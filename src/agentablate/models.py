@@ -63,3 +63,15 @@ class ExperimentBundle(FrozenModel):
     config_hash: str
     config: ExperimentConfig
     tasks: tuple[TaskSpec, ...]
+
+
+class TrialSpec(FrozenModel):
+    id: str
+    experiment: str
+    agent: AgentConfig
+    variant: VariantConfig
+    task: TaskSpec
+    repetition: int
+    timeout_seconds: int
+    config_hash: str
+    extension_hashes: tuple[str, ...]
