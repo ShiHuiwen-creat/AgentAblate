@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from agentablate.models import ExperimentBundle, TrialSpec
+from agentablate.workspace import resolve_revision
 
 
 def fingerprint_path(path: Path) -> str:
@@ -44,6 +45,9 @@ def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
     trials: list[TrialSpec] = []
     meta = bundle.config.experiment
     for task in bundle.tasks:
+        resolved_task = task.model_copy(
+            update={"revision": resolve_revision(task.repo, task.revision)}
+        )
         for agent in bundle.config.agents:
             for variant in bundle.config.variants:
                 skill_hashes = tuple(
@@ -62,10 +66,10 @@ def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
                             "mcp_hashes": mcp_hashes,
                         },
                         "task": {
-                            "id": task.id,
-                            "revision": task.revision,
-                            "prompt": task.prompt,
-                            "test_command": task.test_command,
+                            "id": resolved_task.id,
+                            "revision": resolved_task.revision,
+                            "prompt": resolved_task.prompt,
+                            "test_command": resolved_task.test_command,
                         },
                         "repetition": repetition,
                     }
@@ -75,7 +79,7 @@ def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
                             experiment=meta.name,
                             agent=agent,
                             variant=variant,
-                            task=task,
+                            task=resolved_task,
                             repetition=repetition,
                             timeout_seconds=meta.timeout_seconds,
                             config_hash=bundle.config_hash,

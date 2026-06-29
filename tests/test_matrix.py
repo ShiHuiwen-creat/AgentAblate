@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -28,9 +29,25 @@ def bundle(tmp_path: Path) -> ExperimentBundle:
         ),
         tasks=(),
     )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(("git", "init"), cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ("git", "config", "user.name", "AgentAblate Tests"),
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "config", "user.email", "tests@example.com"),
+        cwd=repo,
+        check=True,
+    )
+    (repo / "tracked.txt").write_text("one\n")
+    subprocess.run(("git", "add", "tracked.txt"), cwd=repo, check=True)
+    subprocess.run(("git", "commit", "-m", "initial"), cwd=repo, check=True)
     task = TaskSpec(
         id="fix-bug",
-        repo=tmp_path / "repo",
+        repo=repo,
         prompt="Fix the bug.",
         test_command=("python", "-m", "pytest", "-q"),
     )
@@ -93,9 +110,12 @@ def test_trial_ids_are_stable_when_experiment_root_moves(
         VariantConfig(id="with-skill", skills=(copied_skill,)),
     )
     copied_config = bundle.config.model_copy(update={"variants": copied_variants})
-    copied_task = bundle.tasks[0].model_copy(
-        update={"repo": tmp_path / "copied" / "repo"}
+    copied_repo = tmp_path / "copied" / "repo"
+    subprocess.run(
+        ("git", "clone", "--quiet", str(bundle.tasks[0].repo), str(copied_repo)),
+        check=True,
     )
+    copied_task = bundle.tasks[0].model_copy(update={"repo": copied_repo})
     copied_bundle = bundle.model_copy(
         update={"config": copied_config, "tasks": (copied_task,)}
     )
@@ -103,3 +123,19 @@ def test_trial_ids_are_stable_when_experiment_root_moves(
     assert [trial.id for trial in expand_matrix(bundle)] == [
         trial.id for trial in expand_matrix(copied_bundle)
     ]
+
+
+def test_expand_matrix_binds_revision_to_commit_oid(bundle: ExperimentBundle) -> None:
+    repo = bundle.tasks[0].repo
+    expected = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    trial = expand_matrix(bundle)[0]
+
+    assert trial.task.revision == expected
+    assert len(trial.task.revision) == 40
