@@ -1,8 +1,10 @@
+import asyncio
 import subprocess
 from pathlib import Path
 
 import pytest
 
+import agentablate.workspace as workspace_module
 from agentablate.workspace import WorkspaceError, WorktreeWorkspace
 
 
@@ -88,6 +90,67 @@ async def test_cleanup_runs_when_trial_body_raises(
             raise RuntimeError("trial failed")
 
     assert str(trial_dir) not in _git("worktree", "list", "--porcelain", cwd=repo)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_creation_after_add_cleans_registration(
+    fixture_repo: tuple[Path, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _, second = fixture_repo
+    trial_dir = tmp_path / "trial"
+    added = asyncio.Event()
+    original_run_git = workspace_module._run_git
+
+    async def pause_after_add(*args: str) -> str:
+        result = await original_run_git(*args)
+        if "add" in args:
+            added.set()
+            await asyncio.Event().wait()
+        return result
+
+    monkeypatch.setattr(workspace_module, "_run_git", pause_after_add)
+
+    async def enter_workspace() -> None:
+        async with WorktreeWorkspace(repo, second, trial_dir):
+            pass
+
+    running = asyncio.create_task(enter_workspace())
+    await asyncio.wait_for(added.wait(), timeout=2)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    registrations = await original_run_git(
+        "-C", str(repo), "worktree", "list", "--porcelain"
+    )
+    assert str(trial_dir) not in registrations
+
+
+@pytest.mark.asyncio
+async def test_cleanup_errors_are_grouped_with_trial_error(
+    fixture_repo: tuple[Path, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _, second = fixture_repo
+    original_run_git = workspace_module._run_git
+    workspace = WorktreeWorkspace(repo, second, tmp_path / "trial")
+
+    with pytest.raises(BaseExceptionGroup) as captured:
+        async with workspace:
+            async def fail_cleanup(*args: str) -> str:
+                if "remove" in args or "prune" in args:
+                    raise WorkspaceError(("git", *args), "cleanup failed")
+                return await original_run_git(*args)
+
+            monkeypatch.setattr(workspace_module, "_run_git", fail_cleanup)
+            raise RuntimeError("trial failed")
+
+    grouped = repr(captured.value.exceptions)
+    assert "trial failed" in grouped
+    assert "cleanup failed" in grouped
 
 
 @pytest.mark.asyncio

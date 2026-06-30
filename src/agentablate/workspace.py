@@ -3,6 +3,8 @@ import subprocess
 from pathlib import Path
 from types import TracebackType
 
+from agentablate.processes import communicate, create_process
+
 
 class WorkspaceError(RuntimeError):
     """Raised when Git cannot create or clean up an isolated workspace."""
@@ -25,12 +27,8 @@ def resolve_revision(repo: Path, revision: str) -> str:
 
 async def _run_git(*args: str) -> str:
     command = ("git", *args)
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await process.communicate()
+    process = await create_process(command)
+    stdout, stderr = await communicate(process)
     if process.returncode != 0:
         raise WorkspaceError(command, stderr.decode(errors="replace"))
     return stdout.decode(errors="replace").strip()
@@ -59,17 +57,58 @@ class WorktreeWorkspace:
             "--verify",
             f"{self.requested_revision}^{{commit}}",
         )
-        await _run_git(
-            "-C",
-            str(self.repo),
-            "worktree",
-            "add",
-            "--detach",
-            str(self.path),
-            self.revision,
-        )
+        try:
+            await _run_git(
+                "-C",
+                str(self.repo),
+                "worktree",
+                "add",
+                "--detach",
+                str(self.path),
+                self.revision,
+            )
+        except BaseException as error:
+            cleanup_errors = await self._finish_cleanup(force_remove=False)
+            if cleanup_errors:
+                raise BaseExceptionGroup(
+                    "worktree creation and cleanup failed", [error, *cleanup_errors]
+                ) from None
+            raise
         self._created = True
         return self
+
+    async def _cleanup(self, *, force_remove: bool) -> list[BaseException]:
+        errors: list[BaseException] = []
+        should_remove = force_remove
+        if not force_remove:
+            try:
+                registrations = await _run_git(
+                    "-C", str(self.repo), "worktree", "list", "--porcelain"
+                )
+                should_remove = f"worktree {self.path}" in registrations.splitlines()
+            except BaseException as error:
+                errors.append(error)
+        if should_remove:
+            try:
+                await _run_git(
+                    "-C", str(self.repo), "worktree", "remove", "--force", str(self.path)
+                )
+            except BaseException as error:
+                errors.append(error)
+        try:
+            await _run_git("-C", str(self.repo), "worktree", "prune")
+        except BaseException as error:
+            errors.append(error)
+        self._created = False
+        return errors
+
+    async def _finish_cleanup(self, *, force_remove: bool) -> list[BaseException]:
+        cleanup = asyncio.create_task(self._cleanup(force_remove=force_remove))
+        try:
+            return await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await cleanup
+            raise
 
     async def __aexit__(
         self,
@@ -79,9 +118,13 @@ class WorktreeWorkspace:
     ) -> None:
         if not self._created:
             return
-        try:
-            await _run_git(
-                "-C", str(self.repo), "worktree", "remove", "--force", str(self.path)
-            )
-        finally:
-            await _run_git("-C", str(self.repo), "worktree", "prune")
+        cleanup_errors = await self._finish_cleanup(force_remove=True)
+        if not cleanup_errors:
+            return
+        if exc_value is not None:
+            raise BaseExceptionGroup(
+                "trial and workspace cleanup failed", [exc_value, *cleanup_errors]
+            ) from None
+        if len(cleanup_errors) == 1:
+            raise cleanup_errors[0]
+        raise BaseExceptionGroup("workspace cleanup failed", cleanup_errors)
