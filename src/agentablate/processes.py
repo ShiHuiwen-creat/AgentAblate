@@ -96,7 +96,9 @@ async def communicate(
             return await asyncio.shield(communication)
     except asyncio.CancelledError as error:
         stdout, stderr = await _collect_after_termination(process, communication)
-        raise ProcessCancelled(stdout, stderr, process.returncode or -1) from error
+        exit_code = process.returncode if process.returncode is not None else -1
+        raise ProcessCancelled(stdout, stderr, exit_code) from error
     except TimeoutError as error:
         stdout, stderr = await _collect_after_termination(process, communication)
-        raise ProcessTimeout(stdout, stderr, process.returncode or -1) from error
+        exit_code = process.returncode if process.returncode is not None else -1
+        raise ProcessTimeout(stdout, stderr, exit_code) from error

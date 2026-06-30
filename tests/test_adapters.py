@@ -60,6 +60,7 @@ async def test_command_adapter_substitutes_prompt_without_a_shell(
 
     assert result.exit_code == 0
     assert result.stdout.strip() == trial.task.prompt
+    assert result.events[0].data["executable"] == Path(sys.executable).name
     assert not (tmp_path / "should-not-exist").exists()
 
 

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import time
 from collections.abc import Callable, Iterable
@@ -14,7 +15,12 @@ from agentablate.adapters.base import (
 )
 from agentablate.adapters.command import CommandAdapter
 from agentablate.adapters.fake import FakeAdapter
-from agentablate.evaluators import EvaluationResult, EvaluationTimeout, evaluate
+from agentablate.evaluators import (
+    EvaluationCancelled,
+    EvaluationResult,
+    EvaluationTimeout,
+    evaluate,
+)
 from agentablate.models import TrialSpec
 from agentablate.storage import SQLiteStorage
 from agentablate.workspace import WorktreeWorkspace
@@ -37,12 +43,14 @@ class TrialRunner:
         adapters: dict[str, AdapterFactory] | None = None,
         workspace_factory: WorkspaceFactory = WorktreeWorkspace,
         evaluator: Evaluator = evaluate,
+        recover_running: bool = False,
     ) -> None:
         self.root = root
         self.storage = storage
         self.workspace_factory = workspace_factory
         self.evaluator = evaluator
-        self.adapters = adapters or {
+        self.recover_running = recover_running
+        self.adapters = adapters if adapters is not None else {
             "fake": lambda trial: FakeAdapter(),
             "command": self._command_adapter,
         }
@@ -54,6 +62,8 @@ class TrialRunner:
         return CommandAdapter(trial.agent.command)
 
     def events_path(self, trial_id: str) -> Path:
+        if not trial_id or Path(trial_id).name != trial_id or trial_id in {".", ".."}:
+            raise ValueError("trial id must be a single path-safe name")
         return self.root / ".agentablate" / "runs" / trial_id / "events.jsonl"
 
     def _append_events(self, trial_id: str, events: tuple[AgentEvent, ...]) -> None:
@@ -69,8 +79,8 @@ class TrialRunner:
                     "timestamp": event.timestamp,
                     "trial_id": trial_id,
                 }
-                stream.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
-                stream.write("\n")
+                line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+                stream.write(line)
                 stream.flush()
 
     def _adapter_for(self, trial: TrialSpec) -> AgentAdapter:
@@ -83,15 +93,18 @@ class TrialRunner:
         return factory(trial)
 
     async def run_trial(self, trial: TrialSpec) -> dict[str, Any]:
+        events_path = self.events_path(trial.id)
         self.storage.register_experiment(
             trial.experiment, trial.config_hash, f"{trial.experiment}.yml"
         )
-        if self.storage.is_completed(trial.id):
+        claim = self.storage.claim_trial(
+            trial, recover_running=self.recover_running
+        )
+        if claim != "claimed":
             row = self.storage.get_trial(trial.id)
             assert row is not None
             return row
-
-        self.storage.start_trial(trial)
+        events_path.unlink(missing_ok=True)
         started = time.monotonic()
         status = "failed"
         success: bool | None = False
@@ -107,26 +120,55 @@ class TrialRunner:
                 trial.task.repo, trial.task.revision, workspace_path
             ) as workspace:
                 adapter = self._adapter_for(trial)
+                incremental = self._supports_event_sink(adapter)
                 try:
-                    adapter_result = await adapter.run(trial, workspace.path)
+                    if incremental:
+                        adapter_result = await adapter.run(
+                            trial,
+                            workspace.path,
+                            on_event=lambda event: self._append_events(
+                                trial.id, (event,)
+                            ),
+                        )
+                    else:
+                        adapter_result = await adapter.run(trial, workspace.path)
                 except AdapterCancelled as exc:
                     self._record_adapter_result(
-                        trial.id, exc.result, stdout_parts, stderr_parts
+                        trial.id,
+                        exc.result,
+                        stdout_parts,
+                        stderr_parts,
+                        include_events=not incremental,
                     )
                     exit_code = exc.result.exit_code
                     raise
                 except AdapterTimeout as exc:
-                    self._record_adapter_result(trial.id, exc.result, stdout_parts, stderr_parts)
+                    self._record_adapter_result(
+                        trial.id,
+                        exc.result,
+                        stdout_parts,
+                        stderr_parts,
+                        include_events=not incremental,
+                    )
                     exit_code = exc.result.exit_code
                     raise
                 self._record_adapter_result(
-                    trial.id, adapter_result, stdout_parts, stderr_parts
+                    trial.id,
+                    adapter_result,
+                    stdout_parts,
+                    stderr_parts,
+                    include_events=not incremental,
                 )
                 exit_code = adapter_result.exit_code
                 try:
                     evaluation: EvaluationResult = await self.evaluator(
                         trial.task, workspace.path, trial.timeout_seconds
                     )
+                except EvaluationCancelled as exc:
+                    stdout_parts.append(exc.result.stdout)
+                    stderr_parts.append(exc.result.stderr)
+                    exit_code = exc.result.exit_code
+                    raise
                 except EvaluationTimeout as exc:
                     stdout_parts.append(exc.result.stdout)
                     stderr_parts.append(exc.result.stderr)
@@ -139,9 +181,9 @@ class TrialRunner:
                 status = "completed"
         except asyncio.CancelledError as exc:
             cancelled = exc
-            error_text = f"{type(exc).__name__}: {exc}"
+            error_text = self._redact_error(trial, exc)
         except Exception as exc:
-            error_text = f"{type(exc).__name__}: {exc}"
+            error_text = self._redact_error(trial, exc)
         finally:
             self.storage.finish_trial(
                 trial,
@@ -166,10 +208,33 @@ class TrialRunner:
         result: AdapterResult,
         stdout_parts: list[str],
         stderr_parts: list[str],
+        *,
+        include_events: bool,
     ) -> None:
-        self._append_events(trial_id, result.events)
+        if include_events:
+            self._append_events(trial_id, result.events)
         stdout_parts.append(result.stdout)
         stderr_parts.append(result.stderr)
+
+    @staticmethod
+    def _supports_event_sink(adapter: AgentAdapter) -> bool:
+        parameters = inspect.signature(adapter.run).parameters.values()
+        return any(
+            parameter.name == "on_event"
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+
+    def _redact_error(self, trial: TrialSpec, error: BaseException) -> str:
+        text = f"{type(error).__name__}: {error}"
+        replacements = sorted(
+            ((str(self.root.resolve()), "<root>"), (str(trial.task.repo.resolve()), "<repo>")),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        )
+        for value, replacement in replacements:
+            text = text.replace(value, replacement)
+        return text
 
     async def run_all(
         self, trials: Iterable[TrialSpec], concurrency: int
@@ -180,6 +245,16 @@ class TrialRunner:
 
         async def limited(trial: TrialSpec) -> dict[str, Any]:
             async with semaphore:
-                return await self.run_trial(trial)
+                try:
+                    return await self.run_trial(trial)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    return {
+                        "id": trial.id,
+                        "status": "failed",
+                        "success": False,
+                        "error": self._redact_error(trial, error),
+                    }
 
         return list(await asyncio.gather(*(limited(trial) for trial in trials)))

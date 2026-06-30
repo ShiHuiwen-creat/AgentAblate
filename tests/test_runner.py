@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -37,7 +38,7 @@ class RecordingWorkspace:
         self.calls = calls
 
     async def __aenter__(self) -> "RecordingWorkspace":
-        self.path.mkdir(parents=True)
+        self.path.mkdir(parents=True, exist_ok=True)
         self.calls.append("workspace")
         return self
 
@@ -230,6 +231,12 @@ async def test_command_cancellation_persists_partial_streams_and_events(
         while not marker.exists():
             await asyncio.sleep(0.01)
 
+    in_progress = [
+        json.loads(line)
+        for line in runner.events_path(trial.id).read_text().splitlines()
+    ]
+    assert [event["kind"] for event in in_progress] == ["start"]
+
     running.cancel()
     with pytest.raises(asyncio.CancelledError):
         await running
@@ -243,6 +250,189 @@ async def test_command_cancellation_persists_partial_streams_and_events(
     assert [event["kind"] for event in events] == ["start", "cancelled"]
     assert {event["trial_id"] for event in events} == {trial.id}
     assert calls[-1] == "cleanup"
+
+
+@pytest.mark.asyncio
+async def test_retry_replaces_failed_attempt_events(tmp_path: Path) -> None:
+    calls: list[str] = []
+    trial = _trial(tmp_path)
+    attempts = 0
+
+    def adapter_factory(trial: TrialSpec) -> RecordingAdapter:
+        nonlocal attempts
+        attempts += 1
+        event = AgentEvent(f"attempt-{attempts}", float(attempts), {})
+        if attempts == 1:
+            result = AdapterResult(-1, (event,), "old", "")
+            return RecordingAdapter(calls, AdapterTimeout(result))
+        return RecordingAdapter(calls, AdapterResult(0, (event,), "new", ""))
+
+    async def evaluator(task: TaskSpec, path: Path, timeout: float) -> EvaluationResult:
+        return EvaluationResult(True, 0, "", "", ())
+
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        adapters={"fake": adapter_factory},
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, calls
+        ),
+        evaluator=evaluator,
+    )
+
+    assert (await runner.run_trial(trial))["status"] == "failed"
+    assert (await runner.run_trial(trial))["status"] == "completed"
+
+    events = [json.loads(line) for line in runner.events_path(trial.id).read_text().splitlines()]
+    assert [event["kind"] for event in events] == ["attempt-2"]
+
+
+@pytest.mark.asyncio
+async def test_evaluator_cancellation_persists_partial_streams(tmp_path: Path) -> None:
+    marker = tmp_path / "evaluation-started"
+    script = (
+        "import pathlib, sys, time; "
+        "print('evaluation stdout', flush=True); "
+        "print('evaluation stderr', file=sys.stderr, flush=True); "
+        f"pathlib.Path({str(marker)!r}).write_text('ready'); "
+        "time.sleep(10)"
+    )
+    task = _trial(tmp_path).task.model_copy(
+        update={"test_command": (sys.executable, "-c", script)}
+    )
+    trial = _trial(tmp_path).model_copy(update={"task": task})
+    calls: list[str] = []
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, calls
+        ),
+    )
+    running = asyncio.create_task(runner.run_trial(trial))
+    async with asyncio.timeout(3):
+        while not marker.exists():
+            await asyncio.sleep(0.01)
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    row = runner.storage.get_trial(trial.id)
+    assert row["status"] == "failed"
+    assert row["error"].startswith("EvaluationCancelled:")
+    assert "evaluation stdout" in row["stdout"]
+    assert row["stderr"] == "evaluation stderr\n"
+    assert calls[-1] == "cleanup"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_trial_id_in_batch_executes_once(tmp_path: Path) -> None:
+    executions = 0
+
+    class BlockingAdapter:
+        async def run(self, trial: TrialSpec, cwd: Path) -> AdapterResult:
+            nonlocal executions
+            executions += 1
+            await asyncio.sleep(0.02)
+            return AdapterResult(0, (), "", "")
+
+    async def evaluator(task: TaskSpec, path: Path, timeout: float) -> EvaluationResult:
+        return EvaluationResult(True, 0, "", "", ())
+
+    calls: list[str] = []
+    trial = _trial(tmp_path)
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        adapters={"fake": lambda trial: BlockingAdapter()},
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, calls
+        ),
+        evaluator=evaluator,
+    )
+
+    rows = await runner.run_all((trial, trial), concurrency=2)
+
+    assert executions == 1
+    assert {row["status"] for row in rows} <= {"running", "completed"}
+
+
+@pytest.mark.asyncio
+async def test_run_all_contains_storage_failure_to_one_trial(tmp_path: Path) -> None:
+    class FailingStorage(SQLiteStorage):
+        def claim_trial(self, trial: TrialSpec, *, recover_running: bool = False) -> str:
+            if trial.id == "broken":
+                raise sqlite3.OperationalError("database is busy")
+            return super().claim_trial(trial, recover_running=recover_running)
+
+    calls: list[str] = []
+    runner = TrialRunner(
+        tmp_path,
+        FailingStorage(tmp_path / "runs.sqlite3"),
+        adapters={
+            "fake": lambda trial: RecordingAdapter(calls, AdapterResult(0, (), "", ""))
+        },
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, calls
+        ),
+        evaluator=lambda task, path, timeout: asyncio.sleep(
+            0, result=EvaluationResult(True, 0, "", "", ())
+        ),
+    )
+
+    rows = await runner.run_all(
+        (_trial(tmp_path, "broken"), _trial(tmp_path, "healthy")), concurrency=2
+    )
+
+    assert rows[0]["status"] == "failed"
+    assert "database is busy" in rows[0]["error"]
+    assert rows[1]["status"] == "completed"
+
+
+def test_events_path_rejects_path_traversal(tmp_path: Path) -> None:
+    runner = TrialRunner(tmp_path, SQLiteStorage(tmp_path / "runs.sqlite3"))
+
+    with pytest.raises(ValueError, match="trial id"):
+        runner.events_path("../escape")
+
+
+@pytest.mark.asyncio
+async def test_failure_error_redacts_workspace_paths(tmp_path: Path) -> None:
+    calls: list[str] = []
+    trial = _trial(tmp_path)
+    error = RuntimeError(f"failed in {tmp_path} and {trial.task.repo}")
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        adapters={"fake": lambda trial: RecordingAdapter(calls, error)},
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, calls
+        ),
+    )
+
+    row = await runner.run_trial(trial)
+
+    assert str(tmp_path) not in row["error"]
+    assert "<root>" in row["error"]
+
+
+@pytest.mark.asyncio
+async def test_empty_adapter_mapping_does_not_enable_defaults(tmp_path: Path) -> None:
+    trial = _trial(tmp_path)
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        adapters={},
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, []
+        ),
+    )
+
+    row = await runner.run_trial(trial)
+
+    assert row["status"] == "failed"
+    assert "unsupported adapter" in row["error"]
 
 
 @pytest.mark.asyncio

@@ -1,9 +1,11 @@
+import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from agentablate.models import TaskSpec
 from agentablate.processes import (
+    ProcessCancelled,
     ProcessTimeout,
     communicate,
     create_process,
@@ -23,6 +25,12 @@ class EvaluationResult:
 class EvaluationTimeout(TimeoutError):
     def __init__(self, result: EvaluationResult) -> None:
         super().__init__("evaluation command timed out")
+        self.result = result
+
+
+class EvaluationCancelled(asyncio.CancelledError):
+    def __init__(self, result: EvaluationResult) -> None:
+        super().__init__("evaluation cancelled")
         self.result = result
 
 
@@ -65,6 +73,15 @@ async def evaluate(
     )
     try:
         stdout, stderr = await communicate(process, timeout_seconds)
+    except ProcessCancelled as error:
+        result = EvaluationResult(
+            success=False,
+            exit_code=error.exit_code,
+            stdout=error.stdout.decode(errors="replace"),
+            stderr=error.stderr.decode(errors="replace"),
+            changed_files=(),
+        )
+        raise EvaluationCancelled(result) from error
     except ProcessTimeout as error:
         result = EvaluationResult(
             success=False,

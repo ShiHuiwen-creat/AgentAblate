@@ -8,6 +8,7 @@ from agentablate.adapters.base import (
     AdapterResult,
     AdapterTimeout,
     AgentEvent,
+    EventSink,
 )
 from agentablate.models import TrialSpec
 from agentablate.processes import (
@@ -44,19 +45,25 @@ class CommandAdapter:
         message = f"{executable} is {'available' if available else 'missing'}"
         return available, message
 
-    async def run(self, trial: TrialSpec, cwd: Path) -> AdapterResult:
+    async def run(
+        self, trial: TrialSpec, cwd: Path, *, on_event: EventSink | None = None
+    ) -> AdapterResult:
         command = tuple(
             argument.replace("{prompt}", trial.task.prompt)
             for argument in self.command
         )
         environment = minimal_environment(self.allowed_env)
         started = time.monotonic()
-        start_event = AgentEvent("start", started, {"executable": command[0]})
+        start_event = AgentEvent(
+            "start", started, {"executable": Path(command[0]).name}
+        )
         process = await create_process(
             command,
             cwd=cwd,
             env=environment,
         )
+        if on_event is not None:
+            on_event(start_event)
         try:
             stdout_bytes, stderr_bytes = await communicate(
                 process, trial.timeout_seconds
@@ -68,6 +75,8 @@ class CommandAdapter:
                     "cancelled", time.monotonic(), {"exit_code": error.exit_code}
                 ),
             )
+            if on_event is not None:
+                on_event(events[-1])
             result = AdapterResult(
                 error.exit_code,
                 events,
@@ -78,10 +87,12 @@ class CommandAdapter:
         except ProcessTimeout as error:
             events = (
                 start_event,
-                AgentEvent("timeout", time.monotonic(), {"exit_code": process.returncode}),
+                AgentEvent("timeout", time.monotonic(), {"exit_code": error.exit_code}),
             )
+            if on_event is not None:
+                on_event(events[-1])
             result = AdapterResult(
-                process.returncode or -1,
+                process.returncode if process.returncode is not None else -1,
                 events,
                 error.stdout.decode(errors="replace"),
                 error.stderr.decode(errors="replace"),
@@ -96,8 +107,10 @@ class CommandAdapter:
                 {"exit_code": process.returncode},
             ),
         )
+        if on_event is not None:
+            on_event(events[-1])
         return AdapterResult(
-            process.returncode or 0,
+            process.returncode if process.returncode is not None else 0,
             events,
             stdout_bytes.decode(errors="replace"),
             stderr_bytes.decode(errors="replace"),

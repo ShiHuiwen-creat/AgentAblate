@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -11,6 +12,9 @@ class AgentEvent:
     kind: str
     timestamp: float
     data: dict[str, object]
+
+
+EventSink = Callable[[AgentEvent], None]
 
 
 @dataclass(frozen=True)
@@ -36,4 +40,6 @@ class AdapterCancelled(asyncio.CancelledError):
 class AgentAdapter(Protocol):
     async def doctor(self) -> tuple[bool, str]: ...
 
-    async def run(self, trial: TrialSpec, cwd: Path) -> AdapterResult: ...
+    async def run(
+        self, trial: TrialSpec, cwd: Path, *, on_event: EventSink | None = None
+    ) -> AdapterResult: ...
