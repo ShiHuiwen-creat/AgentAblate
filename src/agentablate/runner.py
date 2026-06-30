@@ -5,7 +5,13 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from agentablate.adapters.base import AdapterResult, AdapterTimeout, AgentAdapter, AgentEvent
+from agentablate.adapters.base import (
+    AdapterCancelled,
+    AdapterResult,
+    AdapterTimeout,
+    AgentAdapter,
+    AgentEvent,
+)
 from agentablate.adapters.command import CommandAdapter
 from agentablate.adapters.fake import FakeAdapter
 from agentablate.evaluators import EvaluationResult, EvaluationTimeout, evaluate
@@ -103,6 +109,12 @@ class TrialRunner:
                 adapter = self._adapter_for(trial)
                 try:
                     adapter_result = await adapter.run(trial, workspace.path)
+                except AdapterCancelled as exc:
+                    self._record_adapter_result(
+                        trial.id, exc.result, stdout_parts, stderr_parts
+                    )
+                    exit_code = exc.result.exit_code
+                    raise
                 except AdapterTimeout as exc:
                     self._record_adapter_result(trial.id, exc.result, stdout_parts, stderr_parts)
                     exit_code = exc.result.exit_code
@@ -127,7 +139,7 @@ class TrialRunner:
                 status = "completed"
         except asyncio.CancelledError as exc:
             cancelled = exc
-            error_text = f"CancelledError: {exc}"
+            error_text = f"{type(exc).__name__}: {exc}"
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
         finally:

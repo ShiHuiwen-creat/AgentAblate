@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -23,6 +24,12 @@ class AdapterResult:
 class AdapterTimeout(TimeoutError):
     def __init__(self, result: AdapterResult) -> None:
         super().__init__("agent command timed out")
+        self.result = result
+
+
+class AdapterCancelled(asyncio.CancelledError):
+    def __init__(self, result: AdapterResult) -> None:
+        super().__init__("agent command cancelled")
         self.result = result
 
 

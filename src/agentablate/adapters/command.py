@@ -4,12 +4,14 @@ import time
 from pathlib import Path
 
 from agentablate.adapters.base import (
+    AdapterCancelled,
     AdapterResult,
     AdapterTimeout,
     AgentEvent,
 )
 from agentablate.models import TrialSpec
 from agentablate.processes import (
+    ProcessCancelled,
     ProcessTimeout,
     communicate,
     create_process,
@@ -59,6 +61,20 @@ class CommandAdapter:
             stdout_bytes, stderr_bytes = await communicate(
                 process, trial.timeout_seconds
             )
+        except ProcessCancelled as error:
+            events = (
+                start_event,
+                AgentEvent(
+                    "cancelled", time.monotonic(), {"exit_code": error.exit_code}
+                ),
+            )
+            result = AdapterResult(
+                error.exit_code,
+                events,
+                error.stdout.decode(errors="replace"),
+                error.stderr.decode(errors="replace"),
+            )
+            raise AdapterCancelled(result) from error
         except ProcessTimeout as error:
             events = (
                 start_event,

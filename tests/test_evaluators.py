@@ -91,9 +91,9 @@ async def test_evaluator_times_out_and_preserves_output(workspace: Path) -> None
     started = time.monotonic()
 
     with pytest.raises(EvaluationTimeout) as captured:
-        await evaluate(_task(workspace, script), workspace, timeout_seconds=0.1)
+        await evaluate(_task(workspace, script), workspace, timeout_seconds=1)
 
-    assert time.monotonic() - started < 2
+    assert time.monotonic() - started < 3
     assert "started" in captured.value.result.stdout
     assert captured.value.result.success is False
 

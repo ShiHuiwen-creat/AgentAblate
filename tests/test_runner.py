@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -194,6 +195,53 @@ async def test_cancellation_persists_failure_and_cleans_workspace(tmp_path: Path
     row = runner.storage.get_trial(trial.id)
     assert row["status"] == "failed"
     assert row["error"].startswith("CancelledError:")
+    assert calls[-1] == "cleanup"
+
+
+@pytest.mark.asyncio
+async def test_command_cancellation_persists_partial_streams_and_events(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    marker = tmp_path / "agent-started"
+    script = (
+        "import pathlib, sys, time; "
+        "print('partial stdout', flush=True); "
+        "print('partial stderr', file=sys.stderr, flush=True); "
+        f"pathlib.Path({str(marker)!r}).write_text('ready'); "
+        "time.sleep(10)"
+    )
+    trial = _trial(tmp_path, adapter="command").model_copy(
+        update={
+            "agent": AgentConfig(
+                id="command", adapter="command", command=(sys.executable, "-c", script)
+            )
+        }
+    )
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, calls
+        ),
+    )
+    running = asyncio.create_task(runner.run_trial(trial))
+    async with asyncio.timeout(3):
+        while not marker.exists():
+            await asyncio.sleep(0.01)
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    row = runner.storage.get_trial(trial.id)
+    events = [json.loads(line) for line in runner.events_path(trial.id).read_text().splitlines()]
+    assert row["status"] == "failed"
+    assert row["error"].startswith("AdapterCancelled:")
+    assert row["stdout"] == "partial stdout\n"
+    assert row["stderr"] == "partial stderr\n"
+    assert [event["kind"] for event in events] == ["start", "cancelled"]
+    assert {event["trial_id"] for event in events} == {trial.id}
     assert calls[-1] == "cleanup"
 
 

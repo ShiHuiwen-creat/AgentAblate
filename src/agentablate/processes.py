@@ -15,6 +15,14 @@ class ProcessTimeout(TimeoutError):
         self.exit_code = exit_code
 
 
+class ProcessCancelled(asyncio.CancelledError):
+    def __init__(self, stdout: bytes, stderr: bytes, exit_code: int) -> None:
+        super().__init__("process cancelled")
+        self.stdout = stdout
+        self.stderr = stderr
+        self.exit_code = exit_code
+
+
 def minimal_environment(allowed_env: tuple[str, ...] = ()) -> dict[str, str]:
     names = ("PATH", "HOME", "TMPDIR", *allowed_env)
     return {name: os.environ[name] for name in names if name in os.environ}
@@ -86,9 +94,9 @@ async def communicate(
             return await asyncio.shield(communication)
         async with asyncio.timeout(timeout_seconds):
             return await asyncio.shield(communication)
-    except asyncio.CancelledError:
-        await _collect_after_termination(process, communication)
-        raise
+    except asyncio.CancelledError as error:
+        stdout, stderr = await _collect_after_termination(process, communication)
+        raise ProcessCancelled(stdout, stderr, process.returncode or -1) from error
     except TimeoutError as error:
         stdout, stderr = await _collect_after_termination(process, communication)
         raise ProcessTimeout(stdout, stderr, process.returncode or -1) from error
