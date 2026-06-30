@@ -142,9 +142,10 @@ async def test_completed_trial_is_skipped(tmp_path: Path) -> None:
     calls: list[str] = []
     trial = _trial(tmp_path)
     storage = SQLiteStorage(tmp_path / "runs.sqlite3")
-    storage.start_trial(trial)
+    attempt_id = storage.start_trial(trial)
     storage.finish_trial(
         trial,
+        attempt_id,
         status="completed",
         success=True,
         duration_seconds=0,
@@ -361,10 +362,10 @@ async def test_duplicate_trial_id_in_batch_executes_once(tmp_path: Path) -> None
 @pytest.mark.asyncio
 async def test_run_all_contains_storage_failure_to_one_trial(tmp_path: Path) -> None:
     class FailingStorage(SQLiteStorage):
-        def claim_trial(self, trial: TrialSpec, *, recover_running: bool = False) -> str:
+        def claim_trial(self, trial: TrialSpec):
             if trial.id == "broken":
                 raise sqlite3.OperationalError("database is busy")
-            return super().claim_trial(trial, recover_running=recover_running)
+            return super().claim_trial(trial)
 
     calls: list[str] = []
     runner = TrialRunner(
@@ -395,6 +396,49 @@ def test_events_path_rejects_path_traversal(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="trial id"):
         runner.events_path("../escape")
+
+
+@pytest.mark.asyncio
+async def test_event_reset_failure_finishes_claimed_attempt(tmp_path: Path) -> None:
+    trial = _trial(tmp_path)
+    storage = SQLiteStorage(tmp_path / "runs.sqlite3")
+    runner = TrialRunner(tmp_path, storage)
+    runner.events_path(trial.id).mkdir(parents=True)
+
+    row = await runner.run_trial(trial)
+
+    assert row["status"] == "failed"
+    assert "Error:" in row["error"]
+
+
+@pytest.mark.asyncio
+async def test_finish_failure_does_not_mask_cancellation(tmp_path: Path) -> None:
+    class FinishFailingStorage(SQLiteStorage):
+        def finish_trial(self, *args: object, **kwargs: object) -> bool:
+            raise sqlite3.OperationalError("finish unavailable")
+
+    class BlockingAdapter:
+        async def run(self, trial: TrialSpec, cwd: Path) -> AdapterResult:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    storage = FinishFailingStorage(tmp_path / "runs.sqlite3")
+    runner = TrialRunner(
+        tmp_path,
+        storage,
+        adapters={"fake": lambda trial: BlockingAdapter()},
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, []
+        ),
+    )
+    running = asyncio.create_task(runner.run_trial(_trial(tmp_path)))
+    await asyncio.sleep(0)
+    running.cancel()
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await running
+
+    assert any("finish unavailable" in note for note in captured.value.__notes__)
 
 
 @pytest.mark.asyncio

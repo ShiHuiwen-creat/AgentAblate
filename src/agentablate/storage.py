@@ -2,15 +2,23 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from agentablate.models import TrialSpec
 
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+@dataclass(frozen=True, slots=True)
+class TrialClaim:
+    status: str
+    attempt_id: str | None = None
 
 
 class SQLiteStorage:
@@ -38,9 +46,9 @@ class SQLiteStorage:
     def _initialize(self) -> None:
         with self._connection() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version > 1:
+            if version > 2:
                 raise RuntimeError(
-                    f"database schema version {version} is newer than supported version 1"
+                    f"database schema version {version} is newer than supported version 2"
                 )
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -70,7 +78,8 @@ class SQLiteStorage:
                     config_hash TEXT NOT NULL,
                     extension_hashes TEXT NOT NULL,
                     stdout TEXT NOT NULL DEFAULT '',
-                    stderr TEXT NOT NULL DEFAULT ''
+                    stderr TEXT NOT NULL DEFAULT '',
+                    attempt_id TEXT
                     )"""
                 )
                 experiment_columns = {
@@ -94,6 +103,7 @@ class SQLiteStorage:
                     "extension_hashes": "TEXT NOT NULL DEFAULT '[]'",
                     "stdout": "TEXT NOT NULL DEFAULT ''",
                     "stderr": "TEXT NOT NULL DEFAULT ''",
+                    "attempt_id": "TEXT",
                 }
                 for name, definition in additions.items():
                     if name not in columns:
@@ -114,7 +124,7 @@ class SQLiteStorage:
                     raise RuntimeError(
                         f"trials schema is missing columns: {', '.join(sorted(missing))}"
                     )
-                connection.execute("PRAGMA user_version = 1")
+                connection.execute("PRAGMA user_version = 2")
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -134,12 +144,17 @@ class SQLiteStorage:
                 (name, config_hash, portable_source, _utc_now()),
             )
 
-    def start_trial(self, trial: TrialSpec) -> None:
+    def start_trial(self, trial: TrialSpec) -> str:
+        attempt_id = uuid4().hex
         with self._connection() as connection:
-            self._write_start(connection, trial)
+            self._write_start(connection, trial, attempt_id)
+        return attempt_id
 
     def _write_start(
-        self, connection: sqlite3.Connection, trial: TrialSpec
+        self,
+        connection: sqlite3.Connection,
+        trial: TrialSpec,
+        attempt_id: str,
     ) -> None:
         values = (
             trial.id,
@@ -152,24 +167,24 @@ class SQLiteStorage:
             _utc_now(),
             trial.config_hash,
             json.dumps(trial.extension_hashes, separators=(",", ":")),
+            attempt_id,
         )
         connection.execute(
             """
                 INSERT INTO trials(
                     id, experiment, agent_id, variant_id, task_id, repetition,
-                    status, started_at, config_hash, extension_hashes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, started_at, config_hash, extension_hashes, attempt_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     status='running', success=NULL, duration_seconds=NULL,
                     exit_code=NULL, error=NULL, started_at=excluded.started_at,
-                    completed_at=NULL, stdout='', stderr=''
+                    completed_at=NULL, stdout='', stderr='',
+                    attempt_id=excluded.attempt_id
             """,
             values,
         )
 
-    def claim_trial(
-        self, trial: TrialSpec, *, recover_running: bool = False
-    ) -> str:
+    def claim_trial(self, trial: TrialSpec) -> TrialClaim:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -177,15 +192,29 @@ class SQLiteStorage:
             ).fetchone()
             if row is not None:
                 if row["status"] == "completed":
-                    return "completed"
-                if row["status"] == "running" and not recover_running:
-                    return "running"
-            self._write_start(connection, trial)
-            return "claimed"
+                    return TrialClaim("completed")
+                if row["status"] == "running":
+                    return TrialClaim("running")
+            attempt_id = uuid4().hex
+            self._write_start(connection, trial, attempt_id)
+            return TrialClaim("claimed", attempt_id)
+
+    def recover_running(self, trial_id: str) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE trials SET status='failed', success=0,
+                    error='recovered interrupted trial', completed_at=?
+                WHERE id=? AND status='running'
+                """,
+                (_utc_now(), trial_id),
+            )
+        return cursor.rowcount == 1
 
     def finish_trial(
         self,
         trial: TrialSpec,
+        attempt_id: str,
         *,
         status: str,
         success: bool | None,
@@ -194,12 +223,13 @@ class SQLiteStorage:
         error: str | None,
         stdout: str,
         stderr: str,
-    ) -> None:
+    ) -> bool:
         with self._connection() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE trials SET status=?, success=?, duration_seconds=?, exit_code=?,
-                    error=?, completed_at=?, stdout=?, stderr=? WHERE id=?
+                    error=?, completed_at=?, stdout=?, stderr=?
+                WHERE id=? AND attempt_id=? AND status='running'
                 """,
                 (
                     status,
@@ -211,8 +241,10 @@ class SQLiteStorage:
                     stdout,
                     stderr,
                     trial.id,
+                    attempt_id,
                 ),
             )
+        return cursor.rowcount == 1
 
     def is_completed(self, trial_id: str) -> bool:
         row = self.get_trial(trial_id)

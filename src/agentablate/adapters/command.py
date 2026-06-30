@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import time
@@ -17,6 +18,7 @@ from agentablate.processes import (
     communicate,
     create_process,
     minimal_environment,
+    terminate_process,
 )
 
 
@@ -62,6 +64,24 @@ class CommandAdapter:
             cwd=cwd,
             env=environment,
         )
+        try:
+            return await self._run_process(
+                process, trial, start_event, on_event
+            )
+        except BaseException as error:
+            try:
+                await terminate_process(process)
+            except BaseException as cleanup_error:
+                error.add_note(f"process cleanup failed: {cleanup_error}")
+            raise
+
+    async def _run_process(
+        self,
+        process: asyncio.subprocess.Process,
+        trial: TrialSpec,
+        start_event: AgentEvent,
+        on_event: EventSink | None,
+    ) -> AdapterResult:
         if on_event is not None:
             on_event(start_event)
         try:
@@ -75,29 +95,33 @@ class CommandAdapter:
                     "cancelled", time.monotonic(), {"exit_code": error.exit_code}
                 ),
             )
-            if on_event is not None:
-                on_event(events[-1])
+            sink_error = self._emit_terminal(on_event, events[-1])
             result = AdapterResult(
                 error.exit_code,
                 events,
                 error.stdout.decode(errors="replace"),
-                error.stderr.decode(errors="replace"),
+                self._stderr_with_sink_error(error.stderr, sink_error),
             )
-            raise AdapterCancelled(result) from error
+            cancelled = AdapterCancelled(result)
+            if sink_error is not None:
+                cancelled.add_note(str(sink_error))
+            raise cancelled from error
         except ProcessTimeout as error:
             events = (
                 start_event,
                 AgentEvent("timeout", time.monotonic(), {"exit_code": error.exit_code}),
             )
-            if on_event is not None:
-                on_event(events[-1])
+            sink_error = self._emit_terminal(on_event, events[-1])
             result = AdapterResult(
                 process.returncode if process.returncode is not None else -1,
                 events,
                 error.stdout.decode(errors="replace"),
-                error.stderr.decode(errors="replace"),
+                self._stderr_with_sink_error(error.stderr, sink_error),
             )
-            raise AdapterTimeout(result) from error
+            timeout = AdapterTimeout(result)
+            if sink_error is not None:
+                timeout.add_note(str(sink_error))
+            raise timeout from error
 
         events = (
             start_event,
@@ -115,3 +139,23 @@ class CommandAdapter:
             stdout_bytes.decode(errors="replace"),
             stderr_bytes.decode(errors="replace"),
         )
+
+    @staticmethod
+    def _emit_terminal(
+        on_event: EventSink | None, event: AgentEvent
+    ) -> BaseException | None:
+        if on_event is None:
+            return None
+        try:
+            on_event(event)
+        except BaseException as error:
+            return error
+        return None
+
+    @staticmethod
+    def _stderr_with_sink_error(stderr: bytes, error: BaseException | None) -> str:
+        text = stderr.decode(errors="replace")
+        if error is None:
+            return text
+        suffix = f"event sink failed: {error}"
+        return f"{text.rstrip()}\n{suffix}" if text else suffix

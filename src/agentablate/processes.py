@@ -70,10 +70,12 @@ async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
             process.kill()
 
 
-async def _collect_after_termination(
+async def terminate_process(
     process: asyncio.subprocess.Process,
-    communication: asyncio.Task[tuple[bytes, bytes]],
+    communication: asyncio.Task[tuple[bytes, bytes]] | None = None,
 ) -> tuple[bytes, bytes]:
+    if communication is None:
+        communication = asyncio.create_task(process.communicate())
     await _terminate_process_tree(process)
     try:
         return await asyncio.wait_for(asyncio.shield(communication), timeout=5)
@@ -95,10 +97,10 @@ async def communicate(
         async with asyncio.timeout(timeout_seconds):
             return await asyncio.shield(communication)
     except asyncio.CancelledError as error:
-        stdout, stderr = await _collect_after_termination(process, communication)
+        stdout, stderr = await terminate_process(process, communication)
         exit_code = process.returncode if process.returncode is not None else -1
         raise ProcessCancelled(stdout, stderr, exit_code) from error
     except TimeoutError as error:
-        stdout, stderr = await _collect_after_termination(process, communication)
+        stdout, stderr = await terminate_process(process, communication)
         exit_code = process.returncode if process.returncode is not None else -1
         raise ProcessTimeout(stdout, stderr, exit_code) from error

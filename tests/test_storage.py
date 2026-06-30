@@ -32,9 +32,10 @@ def test_storage_records_portable_experiment_and_completed_trial(tmp_path: Path)
     trial = _trial(tmp_path)
 
     storage.register_experiment("demo", "config-hash", tmp_path / "config.yml")
-    storage.start_trial(trial)
+    attempt_id = storage.start_trial(trial)
     storage.finish_trial(
         trial,
+        attempt_id,
         status="completed",
         success=True,
         duration_seconds=1.25,
@@ -80,9 +81,56 @@ def test_claim_is_atomic_and_running_requires_explicit_recovery(tmp_path: Path) 
     storage = SQLiteStorage(tmp_path / "runs.sqlite3")
     trial = _trial(tmp_path)
 
-    assert storage.claim_trial(trial) == "claimed"
-    assert storage.claim_trial(trial) == "running"
-    assert storage.claim_trial(trial, recover_running=True) == "claimed"
+    owner = storage.claim_trial(trial)
+    blocked = storage.claim_trial(trial)
+
+    assert owner.status == "claimed"
+    assert owner.attempt_id
+    assert blocked.status == "running"
+    assert blocked.attempt_id is None
+    assert storage.recover_running(trial.id)
+    recovered = storage.get_trial(trial.id)
+    assert recovered["status"] == "failed"
+    assert recovered["error"] == "recovered interrupted trial"
+
+
+def test_stale_attempt_cannot_finish_new_owner(tmp_path: Path) -> None:
+    storage = SQLiteStorage(tmp_path / "runs.sqlite3")
+    trial = _trial(tmp_path)
+    first = storage.claim_trial(trial)
+    assert storage.recover_running(trial.id)
+
+    stale_after_recovery = storage.finish_trial(
+        trial,
+        first.attempt_id,
+        status="completed",
+        success=True,
+        duration_seconds=1,
+        exit_code=0,
+        error=None,
+        stdout="stale",
+        stderr="",
+    )
+    assert not stale_after_recovery
+    assert storage.get_trial(trial.id)["status"] == "failed"
+
+    second = storage.claim_trial(trial)
+    stale_after_reclaim = storage.finish_trial(
+        trial,
+        first.attempt_id,
+        status="completed",
+        success=True,
+        duration_seconds=1,
+        exit_code=0,
+        error=None,
+        stdout="stale",
+        stderr="",
+    )
+    current = storage.get_trial(trial.id)
+
+    assert not stale_after_reclaim
+    assert current["status"] == "running"
+    assert current["attempt_id"] == second.attempt_id
 
 
 def test_storage_migrates_legacy_schema_before_writing(tmp_path: Path) -> None:
@@ -104,9 +152,11 @@ def test_storage_migrates_legacy_schema_before_writing(tmp_path: Path) -> None:
     storage = SQLiteStorage(path)
     trial = _trial(tmp_path)
 
-    assert storage.claim_trial(trial) == "claimed"
+    claim = storage.claim_trial(trial)
+    assert claim.status == "claimed"
     storage.finish_trial(
         trial,
+        claim.attempt_id,
         status="completed",
         success=True,
         duration_seconds=0,
@@ -120,13 +170,13 @@ def test_storage_migrates_legacy_schema_before_writing(tmp_path: Path) -> None:
     assert row["config_hash"] == trial.config_hash
     assert row["stdout"] == "out"
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
 
 
 def test_storage_rejects_newer_schema_version(tmp_path: Path) -> None:
     path = tmp_path / "future.sqlite3"
     with closing(sqlite3.connect(path)) as connection:
-        connection.execute("PRAGMA user_version = 2")
+        connection.execute("PRAGMA user_version = 3")
 
     with pytest.raises(RuntimeError, match="newer than supported"):
         SQLiteStorage(path)

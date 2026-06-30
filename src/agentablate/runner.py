@@ -50,6 +50,7 @@ class TrialRunner:
         self.workspace_factory = workspace_factory
         self.evaluator = evaluator
         self.recover_running = recover_running
+        self._recovery_attempted: set[str] = set()
         self.adapters = adapters if adapters is not None else {
             "fake": lambda trial: FakeAdapter(),
             "command": self._command_adapter,
@@ -97,14 +98,16 @@ class TrialRunner:
         self.storage.register_experiment(
             trial.experiment, trial.config_hash, f"{trial.experiment}.yml"
         )
-        claim = self.storage.claim_trial(
-            trial, recover_running=self.recover_running
-        )
-        if claim != "claimed":
+        if self.recover_running and trial.id not in self._recovery_attempted:
+            self._recovery_attempted.add(trial.id)
+            self.storage.recover_running(trial.id)
+        claim = self.storage.claim_trial(trial)
+        if claim.status != "claimed":
             row = self.storage.get_trial(trial.id)
             assert row is not None
             return row
-        events_path.unlink(missing_ok=True)
+        assert claim.attempt_id is not None
+        attempt_id = claim.attempt_id
         started = time.monotonic()
         status = "failed"
         success: bool | None = False
@@ -115,6 +118,7 @@ class TrialRunner:
         cancelled: asyncio.CancelledError | None = None
 
         try:
+            events_path.unlink(missing_ok=True)
             workspace_path = self.root / ".agentablate" / "worktrees" / trial.id
             async with self.workspace_factory(
                 trial.task.repo, trial.task.revision, workspace_path
@@ -185,16 +189,26 @@ class TrialRunner:
         except Exception as exc:
             error_text = self._redact_error(trial, exc)
         finally:
-            self.storage.finish_trial(
-                trial,
-                status=status,
-                success=success,
-                duration_seconds=time.monotonic() - started,
-                exit_code=exit_code,
-                error=error_text,
-                stdout="\n".join(part for part in stdout_parts if part),
-                stderr="\n".join(part for part in stderr_parts if part),
-            )
+            try:
+                finished = self.storage.finish_trial(
+                    trial,
+                    attempt_id,
+                    status=status,
+                    success=success,
+                    duration_seconds=time.monotonic() - started,
+                    exit_code=exit_code,
+                    error=error_text,
+                    stdout="\n".join(part for part in stdout_parts if part),
+                    stderr="\n".join(part for part in stderr_parts if part),
+                )
+                if not finished:
+                    raise RuntimeError("trial attempt ownership was lost before finish")
+            except Exception as finish_error:
+                if cancelled is None:
+                    raise
+                cancelled.add_note(
+                    f"failed to persist cancelled trial: {finish_error}"
+                )
 
         if cancelled is not None:
             raise cancelled

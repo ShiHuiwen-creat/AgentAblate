@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agentablate.adapters.base import AdapterTimeout
+from agentablate.adapters.base import AdapterCancelled, AdapterTimeout, AgentEvent
 from agentablate.adapters.command import CommandAdapter
 from agentablate.adapters.fake import FakeAdapter
 from agentablate.models import AgentConfig, TaskSpec, TrialSpec, VariantConfig
@@ -157,3 +157,63 @@ async def test_doctor_rejects_non_executable_file(tmp_path: Path) -> None:
     available, _ = await CommandAdapter((str(command),)).doctor()
 
     assert not available
+
+
+@pytest.mark.asyncio
+async def test_start_event_sink_failure_terminates_process(
+    trial: TrialSpec, tmp_path: Path
+) -> None:
+    leaked = tmp_path / "start-sink-leaked"
+    script = (
+        "import pathlib, time; time.sleep(0.5); "
+        f"pathlib.Path({str(leaked)!r}).write_text('leaked')"
+    )
+
+    with pytest.raises(OSError, match="event write failed"):
+        await CommandAdapter((sys.executable, "-c", script)).run(
+            trial,
+            tmp_path,
+            on_event=lambda event: (_ for _ in ()).throw(
+                OSError("event write failed")
+            ),
+        )
+    await asyncio.sleep(0.7)
+
+    assert not leaked.exists()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_event_sink_failure_preserves_cancellation_and_reaps(
+    trial: TrialSpec, tmp_path: Path
+) -> None:
+    ready = tmp_path / "ready"
+    leaked = tmp_path / "cancel-sink-leaked"
+    script = (
+        "import pathlib, time; "
+        f"pathlib.Path({str(ready)!r}).write_text('ready'); "
+        "print('partial', flush=True); time.sleep(0.5); "
+        f"pathlib.Path({str(leaked)!r}).write_text('leaked')"
+    )
+
+    def sink(event: AgentEvent) -> None:
+        if event.kind == "cancelled":
+            raise OSError("terminal event write failed")
+
+    running = asyncio.create_task(
+        CommandAdapter((sys.executable, "-c", script)).run(
+            trial, tmp_path, on_event=sink
+        )
+    )
+    async with asyncio.timeout(2):
+        while not ready.exists():
+            await asyncio.sleep(0.01)
+    running.cancel()
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await running
+    await asyncio.sleep(0.7)
+
+    assert isinstance(captured.value, AdapterCancelled)
+    assert "partial" in captured.value.result.stdout
+    assert "terminal event write failed" in captured.value.result.stderr
+    assert not leaked.exists()
