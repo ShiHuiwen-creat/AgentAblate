@@ -16,6 +16,23 @@ class WorkspaceError(RuntimeError):
         super().__init__(f"{' '.join(command)}: {detail}")
 
 
+def initialize_fixture_repository(path: Path) -> None:
+    """Create a small committed Git repository suitable for starter experiments."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "README.md").write_text("# AgentAblate fixture\n", encoding="utf-8")
+    commands = (
+        ("git", "init", str(path)),
+        ("git", "-C", str(path), "config", "user.name", "AgentAblate"),
+        ("git", "-C", str(path), "config", "user.email", "agentablate@example.invalid"),
+        ("git", "-C", str(path), "add", "README.md"),
+        ("git", "-C", str(path), "commit", "-m", "Initial fixture"),
+    )
+    for command in commands:
+        completed = subprocess.run(command, capture_output=True, text=True)
+        if completed.returncode != 0:
+            raise WorkspaceError(command, completed.stderr)
+
+
 def resolve_revision(repo: Path, revision: str) -> str:
     """Resolve a revision to the immutable commit object it names."""
     command = ("git", "-C", str(repo), "rev-parse", "--verify", f"{revision}^{{commit}}")
