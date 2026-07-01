@@ -3,6 +3,7 @@ import inspect
 import json
 import time
 from collections.abc import Callable, Iterable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,10 @@ class AdapterConfigurationError(ValueError):
     """Raised when an adapter lacks required trial configuration."""
 
 
+class TrialLeaseLost(RuntimeError):
+    """Raised when a running trial no longer owns its persistence lease."""
+
+
 class TrialRunner:
     def __init__(
         self,
@@ -44,12 +49,22 @@ class TrialRunner:
         workspace_factory: WorkspaceFactory = WorktreeWorkspace,
         evaluator: Evaluator = evaluate,
         recover_running: bool = False,
+        lease_timeout_seconds: float = 60,
+        heartbeat_interval_seconds: float = 10,
     ) -> None:
+        if lease_timeout_seconds <= 0:
+            raise ValueError("lease timeout must be positive")
+        if heartbeat_interval_seconds <= 0:
+            raise ValueError("heartbeat interval must be positive")
+        if heartbeat_interval_seconds >= lease_timeout_seconds:
+            raise ValueError("heartbeat interval must be shorter than lease timeout")
         self.root = root
         self.storage = storage
         self.workspace_factory = workspace_factory
         self.evaluator = evaluator
         self.recover_running = recover_running
+        self.lease_timeout_seconds = lease_timeout_seconds
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self._recovery_attempted: set[str] = set()
         self.adapters = adapters if adapters is not None else {
             "fake": lambda trial: FakeAdapter(),
@@ -99,8 +114,13 @@ class TrialRunner:
             trial.experiment, trial.config_hash, f"{trial.experiment}.yml"
         )
         if self.recover_running and trial.id not in self._recovery_attempted:
+            stale_before = datetime.now(UTC) - timedelta(
+                seconds=self.lease_timeout_seconds
+            )
+            self.storage.recover_running(
+                trial.id, stale_before=stale_before.isoformat()
+            )
             self._recovery_attempted.add(trial.id)
-            self.storage.recover_running(trial.id)
         claim = self.storage.claim_trial(trial)
         if claim.status != "claimed":
             row = self.storage.get_trial(trial.id)
@@ -108,6 +128,9 @@ class TrialRunner:
             return row
         assert claim.attempt_id is not None
         attempt_id = claim.attempt_id
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat(trial.id, attempt_id)
+        )
         started = time.monotonic()
         status = "failed"
         success: bool | None = False
@@ -115,80 +138,79 @@ class TrialRunner:
         error_text: str | None = None
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
+        exit_codes: list[int] = []
         cancelled: asyncio.CancelledError | None = None
+        trial_failure: Exception | None = None
 
         try:
             events_path.unlink(missing_ok=True)
-            workspace_path = self.root / ".agentablate" / "worktrees" / trial.id
-            async with self.workspace_factory(
-                trial.task.repo, trial.task.revision, workspace_path
-            ) as workspace:
-                adapter = self._adapter_for(trial)
-                incremental = self._supports_event_sink(adapter)
-                try:
-                    if incremental:
-                        adapter_result = await adapter.run(
-                            trial,
-                            workspace.path,
-                            on_event=lambda event: self._append_events(
-                                trial.id, (event,)
-                            ),
-                        )
-                    else:
-                        adapter_result = await adapter.run(trial, workspace.path)
-                except AdapterCancelled as exc:
-                    self._record_adapter_result(
-                        trial.id,
-                        exc.result,
-                        stdout_parts,
-                        stderr_parts,
-                        include_events=not incremental,
-                    )
-                    exit_code = exc.result.exit_code
-                    raise
-                except AdapterTimeout as exc:
-                    self._record_adapter_result(
-                        trial.id,
-                        exc.result,
-                        stdout_parts,
-                        stderr_parts,
-                        include_events=not incremental,
-                    )
-                    exit_code = exc.result.exit_code
-                    raise
-                self._record_adapter_result(
-                    trial.id,
-                    adapter_result,
-                    stdout_parts,
-                    stderr_parts,
-                    include_events=not incremental,
+            execution_task = asyncio.create_task(
+                self._execute_trial(
+                    trial, stdout_parts, stderr_parts, exit_codes
                 )
-                exit_code = adapter_result.exit_code
-                try:
-                    evaluation: EvaluationResult = await self.evaluator(
-                        trial.task, workspace.path, trial.timeout_seconds
+            )
+            try:
+                done, _ = await asyncio.wait(
+                    (execution_task, heartbeat_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            except asyncio.CancelledError as external_cancel:
+                cleanup_error = await self._cancel_execution(execution_task)
+                if isinstance(
+                    cleanup_error, (AdapterCancelled, EvaluationCancelled)
+                ):
+                    external_cancel.__cause__ = cleanup_error
+                elif cleanup_error is not None:
+                    external_cancel.add_note(
+                        f"trial cleanup failed: {cleanup_error}"
                     )
-                except EvaluationCancelled as exc:
-                    stdout_parts.append(exc.result.stdout)
-                    stderr_parts.append(exc.result.stderr)
-                    exit_code = exc.result.exit_code
+                raise
+            if heartbeat_task in done:
+                heartbeat = heartbeat_task
+                heartbeat_task = None
+                try:
+                    await heartbeat
+                except TrialLeaseLost as lease_error:
+                    cleanup_error = await self._cancel_execution(execution_task)
+                    if cleanup_error is not None:
+                        lease_error.add_note(
+                            f"trial cleanup failed: {cleanup_error}"
+                        )
                     raise
-                except EvaluationTimeout as exc:
-                    stdout_parts.append(exc.result.stdout)
-                    stderr_parts.append(exc.result.stderr)
-                    exit_code = exc.result.exit_code
-                    raise
-                stdout_parts.append(evaluation.stdout)
-                stderr_parts.append(evaluation.stderr)
-                exit_code = evaluation.exit_code
-                success = evaluation.success
-                status = "completed"
+                raise AssertionError("heartbeat task stopped without losing its lease")
+            success, exit_code = await execution_task
+            status = "completed"
         except asyncio.CancelledError as exc:
             cancelled = exc
-            error_text = self._redact_error(trial, exc)
+            persisted_error = (
+                exc.__cause__
+                if isinstance(exc.__cause__, (AdapterCancelled, EvaluationCancelled))
+                else exc
+            )
+            error_text = self._redact_error(trial, persisted_error)
         except Exception as exc:
+            trial_failure = exc
             error_text = self._redact_error(trial, exc)
         finally:
+            if exit_codes:
+                exit_code = exit_codes[-1]
+            heartbeat_error: Exception | None = None
+            if heartbeat_task is not None:
+                try:
+                    await self._stop_heartbeat(heartbeat_task)
+                except Exception as error:
+                    heartbeat_error = error
+            if heartbeat_error is not None:
+                heartbeat_detail = f"heartbeat failed: {heartbeat_error}"
+                error_text = (
+                    f"{error_text}; {heartbeat_detail}"
+                    if error_text
+                    else heartbeat_detail
+                )
+                status = "failed"
+                success = False
+                if cancelled is not None:
+                    cancelled.add_note(heartbeat_detail)
             try:
                 finished = self.storage.finish_trial(
                     trial,
@@ -202,7 +224,13 @@ class TrialRunner:
                     stderr="\n".join(part for part in stderr_parts if part),
                 )
                 if not finished:
-                    raise RuntimeError("trial attempt ownership was lost before finish")
+                    ownership_error = RuntimeError(
+                        "trial attempt ownership was lost before finish"
+                    )
+                    if trial_failure is not None:
+                        trial_failure.add_note(str(ownership_error))
+                        raise trial_failure
+                    raise ownership_error
             except Exception as finish_error:
                 if cancelled is None:
                     raise
@@ -215,6 +243,111 @@ class TrialRunner:
         row = self.storage.get_trial(trial.id)
         assert row is not None
         return row
+
+    async def _execute_trial(
+        self,
+        trial: TrialSpec,
+        stdout_parts: list[str],
+        stderr_parts: list[str],
+        exit_codes: list[int],
+    ) -> tuple[bool, int]:
+        workspace_path = self.root / ".agentablate" / "worktrees" / trial.id
+        async with self.workspace_factory(
+            trial.task.repo, trial.task.revision, workspace_path
+        ) as workspace:
+            adapter = self._adapter_for(trial)
+            incremental = self._supports_event_sink(adapter)
+            try:
+                if incremental:
+                    adapter_result = await adapter.run(
+                        trial,
+                        workspace.path,
+                        on_event=lambda event: self._append_events(
+                            trial.id, (event,)
+                        ),
+                    )
+                else:
+                    adapter_result = await adapter.run(trial, workspace.path)
+            except AdapterCancelled as exc:
+                self._record_adapter_result(
+                    trial.id,
+                    exc.result,
+                    stdout_parts,
+                    stderr_parts,
+                    include_events=not incremental,
+                )
+                exit_codes.append(exc.result.exit_code)
+                raise
+            except AdapterTimeout as exc:
+                self._record_adapter_result(
+                    trial.id,
+                    exc.result,
+                    stdout_parts,
+                    stderr_parts,
+                    include_events=not incremental,
+                )
+                exit_codes.append(exc.result.exit_code)
+                raise
+            self._record_adapter_result(
+                trial.id,
+                adapter_result,
+                stdout_parts,
+                stderr_parts,
+                include_events=not incremental,
+            )
+            exit_codes.append(adapter_result.exit_code)
+            try:
+                evaluation: EvaluationResult = await self.evaluator(
+                    trial.task, workspace.path, trial.timeout_seconds
+                )
+            except EvaluationCancelled as exc:
+                stdout_parts.append(exc.result.stdout)
+                stderr_parts.append(exc.result.stderr)
+                exit_codes.append(exc.result.exit_code)
+                raise
+            except EvaluationTimeout as exc:
+                stdout_parts.append(exc.result.stdout)
+                stderr_parts.append(exc.result.stderr)
+                exit_codes.append(exc.result.exit_code)
+                raise
+            stdout_parts.append(evaluation.stdout)
+            stderr_parts.append(evaluation.stderr)
+            exit_codes.append(evaluation.exit_code)
+            return evaluation.success, evaluation.exit_code
+
+    async def _heartbeat(self, trial_id: str, attempt_id: str) -> None:
+        while True:
+            await asyncio.sleep(self.heartbeat_interval_seconds)
+            try:
+                owned = self.storage.heartbeat(trial_id, attempt_id)
+            except Exception as error:
+                raise TrialLeaseLost(f"trial heartbeat failed: {error}") from error
+            if not owned:
+                raise TrialLeaseLost("trial lease ownership was lost")
+
+    @staticmethod
+    async def _cancel_execution(
+        task: asyncio.Task[tuple[bool, int]],
+    ) -> BaseException | None:
+        task.cancel()
+        try:
+            await task
+        except (AdapterCancelled, EvaluationCancelled) as error:
+            return error
+        except asyncio.CancelledError:
+            return None
+        except BaseException as error:
+            return error
+        return None
+
+    @staticmethod
+    async def _stop_heartbeat(task: asyncio.Task[None]) -> None:
+        task.cancel()
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise
 
     def _record_adapter_result(
         self,

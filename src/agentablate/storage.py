@@ -46,9 +46,9 @@ class SQLiteStorage:
     def _initialize(self) -> None:
         with self._connection() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version > 2:
+            if version > 3:
                 raise RuntimeError(
-                    f"database schema version {version} is newer than supported version 2"
+                    f"database schema version {version} is newer than supported version 3"
                 )
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -79,7 +79,8 @@ class SQLiteStorage:
                     extension_hashes TEXT NOT NULL,
                     stdout TEXT NOT NULL DEFAULT '',
                     stderr TEXT NOT NULL DEFAULT '',
-                    attempt_id TEXT
+                    attempt_id TEXT,
+                    heartbeat_at TEXT
                     )"""
                 )
                 experiment_columns = {
@@ -104,6 +105,7 @@ class SQLiteStorage:
                     "stdout": "TEXT NOT NULL DEFAULT ''",
                     "stderr": "TEXT NOT NULL DEFAULT ''",
                     "attempt_id": "TEXT",
+                    "heartbeat_at": "TEXT",
                 }
                 for name, definition in additions.items():
                     if name not in columns:
@@ -124,7 +126,7 @@ class SQLiteStorage:
                     raise RuntimeError(
                         f"trials schema is missing columns: {', '.join(sorted(missing))}"
                     )
-                connection.execute("PRAGMA user_version = 2")
+                connection.execute("PRAGMA user_version = 3")
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -168,18 +170,21 @@ class SQLiteStorage:
             trial.config_hash,
             json.dumps(trial.extension_hashes, separators=(",", ":")),
             attempt_id,
+            _utc_now(),
         )
         connection.execute(
             """
                 INSERT INTO trials(
                     id, experiment, agent_id, variant_id, task_id, repetition,
-                    status, started_at, config_hash, extension_hashes, attempt_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, started_at, config_hash, extension_hashes, attempt_id,
+                    heartbeat_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     status='running', success=NULL, duration_seconds=NULL,
                     exit_code=NULL, error=NULL, started_at=excluded.started_at,
                     completed_at=NULL, stdout='', stderr='',
-                    attempt_id=excluded.attempt_id
+                    attempt_id=excluded.attempt_id,
+                    heartbeat_at=excluded.heartbeat_at
             """,
             values,
         )
@@ -199,15 +204,27 @@ class SQLiteStorage:
             self._write_start(connection, trial, attempt_id)
             return TrialClaim("claimed", attempt_id)
 
-    def recover_running(self, trial_id: str) -> bool:
+    def recover_running(self, trial_id: str, *, stale_before: str) -> bool:
         with self._connection() as connection:
             cursor = connection.execute(
                 """
                 UPDATE trials SET status='failed', success=0,
                     error='recovered interrupted trial', completed_at=?
                 WHERE id=? AND status='running'
+                    AND (heartbeat_at IS NULL OR heartbeat_at < ?)
                 """,
-                (_utc_now(), trial_id),
+                (_utc_now(), trial_id, stale_before),
+            )
+        return cursor.rowcount == 1
+
+    def heartbeat(self, trial_id: str, attempt_id: str) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE trials SET heartbeat_at=?
+                WHERE id=? AND attempt_id=? AND status='running'
+                """,
+                (_utc_now(), trial_id, attempt_id),
             )
         return cursor.rowcount == 1
 

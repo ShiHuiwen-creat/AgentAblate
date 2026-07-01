@@ -88,7 +88,7 @@ def test_claim_is_atomic_and_running_requires_explicit_recovery(tmp_path: Path) 
     assert owner.attempt_id
     assert blocked.status == "running"
     assert blocked.attempt_id is None
-    assert storage.recover_running(trial.id)
+    assert storage.recover_running(trial.id, stale_before="9999-01-01T00:00:00+00:00")
     recovered = storage.get_trial(trial.id)
     assert recovered["status"] == "failed"
     assert recovered["error"] == "recovered interrupted trial"
@@ -98,7 +98,7 @@ def test_stale_attempt_cannot_finish_new_owner(tmp_path: Path) -> None:
     storage = SQLiteStorage(tmp_path / "runs.sqlite3")
     trial = _trial(tmp_path)
     first = storage.claim_trial(trial)
-    assert storage.recover_running(trial.id)
+    assert storage.recover_running(trial.id, stale_before="9999-01-01T00:00:00+00:00")
 
     stale_after_recovery = storage.finish_trial(
         trial,
@@ -170,13 +170,27 @@ def test_storage_migrates_legacy_schema_before_writing(tmp_path: Path) -> None:
     assert row["config_hash"] == trial.config_hash
     assert row["stdout"] == "out"
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_storage_rejects_newer_schema_version(tmp_path: Path) -> None:
     path = tmp_path / "future.sqlite3"
     with closing(sqlite3.connect(path)) as connection:
-        connection.execute("PRAGMA user_version = 3")
+        connection.execute("PRAGMA user_version = 4")
 
     with pytest.raises(RuntimeError, match="newer than supported"):
         SQLiteStorage(path)
+
+
+def test_heartbeat_and_recovery_require_current_stale_owner(tmp_path: Path) -> None:
+    storage = SQLiteStorage(tmp_path / "runs.sqlite3")
+    trial = _trial(tmp_path)
+    claim = storage.claim_trial(trial)
+
+    assert storage.heartbeat(trial.id, claim.attempt_id)
+    fresh = storage.get_trial(trial.id)["heartbeat_at"]
+    assert not storage.recover_running(trial.id, stale_before=fresh)
+    assert storage.recover_running(
+        trial.id, stale_before="9999-01-01T00:00:00+00:00"
+    )
+    assert not storage.heartbeat(trial.id, claim.attempt_id)

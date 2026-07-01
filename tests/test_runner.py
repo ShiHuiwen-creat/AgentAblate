@@ -2,6 +2,7 @@ import asyncio
 import json
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -477,6 +478,170 @@ async def test_empty_adapter_mapping_does_not_enable_defaults(tmp_path: Path) ->
 
     assert row["status"] == "failed"
     assert "unsupported adapter" in row["error"]
+
+
+@pytest.mark.asyncio
+async def test_two_runners_recover_stale_attempt_only_once(tmp_path: Path) -> None:
+    storage_path = tmp_path / "runs.sqlite3"
+    trial = _trial(tmp_path)
+    seed = SQLiteStorage(storage_path)
+    seed.claim_trial(trial)
+    with closing(sqlite3.connect(storage_path)) as connection, connection:
+        connection.execute(
+            "UPDATE trials SET heartbeat_at=? WHERE id=?",
+            ("2000-01-01T00:00:00+00:00", trial.id),
+        )
+    old_events = tmp_path / ".agentablate" / "runs" / trial.id / "events.jsonl"
+    old_events.parent.mkdir(parents=True)
+    old_events.write_text('{"kind":"old"}\n')
+    executions = 0
+
+    class SlowAdapter:
+        async def run(self, trial: TrialSpec, cwd: Path) -> AdapterResult:
+            nonlocal executions
+            executions += 1
+            await asyncio.sleep(0.05)
+            return AdapterResult(
+                0, (AgentEvent("new", 1.0, {}),), "", ""
+            )
+
+    async def evaluator(task: TaskSpec, path: Path, timeout: float) -> EvaluationResult:
+        return EvaluationResult(True, 0, "", "", ())
+
+    def make_runner() -> TrialRunner:
+        return TrialRunner(
+            tmp_path,
+            SQLiteStorage(storage_path),
+            adapters={"fake": lambda trial: SlowAdapter()},
+            workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+                repo, revision, path, []
+            ),
+            evaluator=evaluator,
+            recover_running=True,
+            lease_timeout_seconds=1,
+            heartbeat_interval_seconds=0.01,
+        )
+
+    rows = await asyncio.gather(
+        make_runner().run_trial(trial), make_runner().run_trial(trial)
+    )
+
+    events = [json.loads(line) for line in old_events.read_text().splitlines()]
+    assert executions == 1
+    assert {row["status"] for row in rows} <= {"running", "completed"}
+    assert [event["kind"] for event in events] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_runner_heartbeats_active_attempt(tmp_path: Path) -> None:
+    started = asyncio.Event()
+
+    class BlockingAdapter:
+        async def run(self, trial: TrialSpec, cwd: Path) -> AdapterResult:
+            started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    storage = SQLiteStorage(tmp_path / "runs.sqlite3")
+    trial = _trial(tmp_path)
+    runner = TrialRunner(
+        tmp_path,
+        storage,
+        adapters={"fake": lambda trial: BlockingAdapter()},
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, []
+        ),
+        heartbeat_interval_seconds=0.01,
+    )
+    running = asyncio.create_task(runner.run_trial(trial))
+    await started.wait()
+    initial = storage.get_trial(trial.id)["heartbeat_at"]
+    await asyncio.sleep(0.04)
+
+    assert storage.get_trial(trial.id)["heartbeat_at"] > initial
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+@pytest.mark.asyncio
+async def test_lost_lease_terminates_command_and_fails_trial(tmp_path: Path) -> None:
+    leaked = tmp_path / "lease-lost-leaked"
+    script = (
+        "import pathlib, time; time.sleep(0.5); "
+        f"pathlib.Path({str(leaked)!r}).write_text('leaked')"
+    )
+    base = _trial(tmp_path, adapter="command")
+    trial = base.model_copy(
+        update={
+            "agent": AgentConfig(
+                id="command",
+                adapter="command",
+                command=(sys.executable, "-c", script),
+            )
+        }
+    )
+
+    class LeaseLostStorage(SQLiteStorage):
+        def heartbeat(self, trial_id: str, attempt_id: str) -> bool:
+            return False
+
+    calls: list[str] = []
+    storage = LeaseLostStorage(tmp_path / "runs.sqlite3")
+    runner = TrialRunner(
+        tmp_path,
+        storage,
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, calls
+        ),
+        heartbeat_interval_seconds=0.01,
+    )
+
+    row = await runner.run_trial(trial)
+    await asyncio.sleep(0.7)
+
+    assert row["status"] == "failed"
+    assert row["error"].startswith("TrialLeaseLost:")
+    assert not leaked.exists()
+    assert calls[-1] == "cleanup"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_error_cancels_custom_adapter_and_fails_trial(
+    tmp_path: Path,
+) -> None:
+    leaked = tmp_path / "heartbeat-error-leaked"
+
+    class HeartbeatFailingStorage(SQLiteStorage):
+        def heartbeat(self, trial_id: str, attempt_id: str) -> bool:
+            raise sqlite3.OperationalError("heartbeat unavailable")
+
+    class DelayedAdapter:
+        async def run(self, trial: TrialSpec, cwd: Path) -> AdapterResult:
+            await asyncio.sleep(0.5)
+            leaked.write_text("leaked")
+            return AdapterResult(0, (), "", "")
+
+    calls: list[str] = []
+    storage = HeartbeatFailingStorage(tmp_path / "runs.sqlite3")
+    runner = TrialRunner(
+        tmp_path,
+        storage,
+        adapters={"fake": lambda trial: DelayedAdapter()},
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, calls
+        ),
+        heartbeat_interval_seconds=0.01,
+    )
+
+    row = await runner.run_trial(_trial(tmp_path))
+    await asyncio.sleep(0.7)
+
+    assert row["status"] == "failed"
+    assert row["error"].startswith("TrialLeaseLost:")
+    assert "heartbeat unavailable" in row["error"]
+    assert not leaked.exists()
+    assert calls[-1] == "cleanup"
 
 
 @pytest.mark.asyncio
