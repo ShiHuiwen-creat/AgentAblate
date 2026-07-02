@@ -3,7 +3,7 @@
 <style>body{font:15px system-ui;margin:2rem;color:#222}table{border-collapse:collapse;width:100%}th,td{border:1px solid #bbb;padding:.5rem;text-align:left}th{background:#eee}.notice{padding:.75rem;background:#fff4cc}</style>
 </head><body><h1>AgentAblate report</h1>
 <p>Config hash: {{ report.config_hashes|join(', ') or 'none' }}<br>
-Adapter/version: agent_id / agentablate {{ report.version }}<br>
+Adapter implementation/version: {% for kind, version in report.adapter_implementations %}{{ kind }} / {{ version }}{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}<br>
 Repetitions: {{ report.repetitions }}</p>
 {% if not report.rows %}<p class="notice">No trial results.</p>{% else %}
 {% if not report.has_baseline %}<p class="notice">No baseline variant was found.</p>{% endif %}

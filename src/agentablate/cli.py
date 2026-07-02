@@ -1,17 +1,17 @@
-import asyncio
-import shutil
-import sqlite3
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from agentablate.config import load_experiment
-from agentablate.matrix import expand_matrix
-from agentablate.reporting import load_report, render_html, render_markdown
-from agentablate.runner import TrialRunner
-from agentablate.storage import SQLiteStorage
-from agentablate.workspace import initialize_fixture_repository
+from agentablate.experiment import (
+    ApplicationError,
+    compare_results,
+    doctor_experiment,
+    initialize_experiment,
+    run_experiment,
+    write_report,
+)
+from agentablate.reporting import render_comparison
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -47,51 +47,36 @@ test_command:
 @app.command()
 def init(directory: Path = Path("."), force: bool = False) -> None:
     """Create a starter AgentAblate experiment."""
-    targets = (directory / "agentablate.yaml", directory / "task.yaml", directory / "fixture")
-    existing = [path.name for path in targets if path.exists()]
-    if existing and not force:
-        typer.echo(f"Refusing to overwrite; already exists: {', '.join(existing)}")
-        raise typer.Exit(1)
-    directory.mkdir(parents=True, exist_ok=True)
-    if force and (directory / "fixture").exists():
-        shutil.rmtree(directory / "fixture")
-    (directory / "agentablate.yaml").write_text(CONFIG, encoding="utf-8")
-    (directory / "task.yaml").write_text(TASK, encoding="utf-8")
     try:
-        initialize_fixture_repository(directory / "fixture")
-    except Exception as error:
-        typer.echo(f"Initialization failed: {error}")
+        initialize_experiment(directory, CONFIG, TASK, force)
+    except ApplicationError as error:
+        typer.echo(str(error))
         raise typer.Exit(1) from error
     typer.echo(f"Initialized experiment in {directory}")
 
 
 @app.command()
-def doctor(config: Path) -> None:
+def doctor(
+    config: Annotated[Path, typer.Argument()] = Path("agentablate.yaml"),
+) -> None:
     """Check whether an experiment can run locally."""
     try:
-        bundle = load_experiment(config)
-    except Exception as error:
-        raise typer.BadParameter(str(error), param_hint="config") from error
-    unavailable = False
-    for agent in bundle.config.agents:
-        available = agent.adapter == "fake"
-        detail = "built-in fake adapter"
-        if agent.adapter == "command":
-            executable = agent.command[0] if agent.command else ""
-            available = bool(executable and shutil.which(executable))
-            detail = executable or "command not configured"
-        elif agent.adapter != "fake":
-            available = False
-            detail = "adapter is not available in Phase 1"
-        unavailable |= not available
-        typer.echo(f"{agent.id}: {'available' if available else 'unavailable'} ({detail})")
-    if unavailable:
+        results = doctor_experiment(config)
+    except ApplicationError as error:
+        typer.echo(str(error))
+        raise typer.Exit(1) from error
+    for result in results:
+        typer.echo(
+            f"{result.agent_id}: "
+            f"{'available' if result.available else 'unavailable'} ({result.detail})"
+        )
+    if any(not result.available for result in results):
         raise typer.Exit(1)
 
 
 @app.command()
 def run(
-    config: Path,
+    config: Annotated[Path, typer.Argument()] = Path("agentablate.yaml"),
     agent: Annotated[list[str] | None, typer.Option("--agent")] = None,
     variant: Annotated[list[str] | None, typer.Option("--variant")] = None,
     task: Annotated[list[str] | None, typer.Option("--task")] = None,
@@ -100,43 +85,34 @@ def run(
 ) -> None:
     """Run an AgentAblate experiment."""
     try:
-        bundle = load_experiment(config)
-        trials = expand_matrix(bundle)
-    except Exception as error:
-        raise typer.BadParameter(str(error), param_hint="config") from error
-    selected = [
-        trial
-        for trial in trials
-        if (not agent or trial.agent.id in agent)
-        and (not variant or trial.variant.id in variant)
-        and (not task or trial.task.id in task)
-    ]
-    if not selected:
-        typer.echo("No trials match the selected filters.")
-        raise typer.Exit(1)
-    root = bundle.source.parent
-    storage = SQLiteStorage(root / ".agentablate" / "results.sqlite3")
-    runner = TrialRunner(root, storage, recover_running=resume)
-    rows = asyncio.run(runner.run_all(selected, concurrency))
-    failed = sum(row.get("status") != "completed" for row in rows)
-    typer.echo(f"Ran {len(rows)} trial(s); {failed} failed")
-    if failed:
+        summary = run_experiment(
+            config, agents=agent or (), variants=variant or (), tasks=task or (),
+            concurrency=concurrency, resume=resume,
+        )
+    except ApplicationError as error:
+        typer.echo(str(error))
+        raise typer.Exit(1) from error
+    typer.echo(f"Ran {summary.total} trial(s); {summary.failed} failed")
+    if summary.failed:
         raise typer.Exit(1)
 
 
 @app.command()
-def compare(database: Path) -> None:
+def compare(
+    database: Annotated[Path, typer.Argument()] = Path(".agentablate/results.sqlite3"),
+) -> None:
     """Compare experiment variants."""
     try:
-        report_data = load_report(database)
-    except (OSError, sqlite3.Error) as error:
-        raise typer.BadParameter(str(error), param_hint="database") from error
-    typer.echo(render_markdown(report_data))
+        comparison = compare_results(database)
+    except ApplicationError as error:
+        typer.echo(str(error))
+        raise typer.Exit(1) from error
+    typer.echo(render_comparison(comparison))
 
 
 @app.command()
 def report(
-    database: Path,
+    database: Annotated[Path, typer.Argument()] = Path(".agentablate/results.sqlite3"),
     format: Annotated[str, typer.Option("--format")] = "markdown",
     output: Annotated[Path | None, typer.Option("--output")] = None,
 ) -> None:
@@ -144,11 +120,10 @@ def report(
     if format not in {"markdown", "html"}:
         raise typer.BadParameter("format must be markdown or html", param_hint="format")
     try:
-        report_data = load_report(database)
-    except (OSError, sqlite3.Error) as error:
-        raise typer.BadParameter(str(error), param_hint="database") from error
-    suffix = "md" if format == "markdown" else "html"
-    destination = output or Path(f"agentablate-report.{suffix}")
-    rendered = render_markdown(report_data) if format == "markdown" else render_html(report_data)
-    destination.write_text(rendered, encoding="utf-8")
+        suffix = "md" if format == "markdown" else "html"
+        destination = output or Path(f"agentablate-report.{suffix}")
+        write_report(database, destination, format)
+    except ApplicationError as error:
+        typer.echo(str(error))
+        raise typer.Exit(1) from error
     typer.echo(f"Wrote {destination}")

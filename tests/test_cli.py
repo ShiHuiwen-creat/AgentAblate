@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -123,8 +124,8 @@ def test_compare_and_report_end_to_end() -> None:
         assert runner.invoke(app, ["run", str(config)]).exit_code == 0
         database = ".agentablate/results.sqlite3"
 
-        comparison = runner.invoke(app, ["compare", database])
-        markdown = runner.invoke(app, ["report", database, "--format", "markdown"])
+        comparison = runner.invoke(app, ["compare"])
+        markdown = runner.invoke(app, ["report", "--format", "markdown"])
         html = runner.invoke(app, ["report", database, "--format", "html", "--output", "out.html"])
 
         assert comparison.exit_code == 0
@@ -134,3 +135,73 @@ def test_compare_and_report_end_to_end() -> None:
         assert html.exit_code == 0 and Path("out.html").is_file()
         assert "<style>" in Path("out.html").read_text()
         assert "http" not in Path("out.html").read_text()
+
+        first = Path("agentablate-report.md").read_bytes()
+        assert runner.invoke(app, ["report", "--format", "markdown"]).exit_code == 0
+        assert Path("agentablate-report.md").read_bytes() == first
+
+
+def test_default_config_and_resume_recover_stale_running_trial() -> None:
+    with runner.isolated_filesystem():
+        assert runner.invoke(app, ["init"]).exit_code == 0
+        assert runner.invoke(app, ["doctor"]).exit_code == 0
+        assert runner.invoke(app, ["run"]).exit_code == 0
+        database = Path(".agentablate/results.sqlite3")
+        stale = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        with closing(sqlite3.connect(database)) as connection, connection:
+            connection.execute(
+                "UPDATE trials SET status='running', heartbeat_at=?", (stale,)
+            )
+
+        blocked = runner.invoke(app, ["run", "--no-resume"])
+        recovered = runner.invoke(app, ["run", "--resume"])
+
+        assert blocked.exit_code == 1
+        assert recovered.exit_code == 0
+        with closing(sqlite3.connect(database)) as connection:
+            assert connection.execute("SELECT status FROM trials").fetchone()[0] == "completed"
+
+
+def test_combined_agent_variant_and_task_filters() -> None:
+    with runner.isolated_filesystem():
+        assert runner.invoke(app, ["init"]).exit_code == 0
+        config = Path("agentablate.yaml")
+        config.write_text(
+            config.read_text()
+            .replace(
+                "- id: fake\n    adapter: fake",
+                "- id: fake\n    adapter: fake\n  - id: second\n    adapter: fake",
+            )
+            .replace("- id: baseline", "- id: baseline\n  - id: extra")
+        )
+
+        result = runner.invoke(
+            app,
+            ["run", "--agent", "second", "--variant", "extra", "--task", "starter-task"],
+        )
+
+        assert result.exit_code == 0, (result.stdout, result.exception)
+        with closing(sqlite3.connect(".agentablate/results.sqlite3")) as connection:
+            row = connection.execute(
+                "SELECT agent_id, variant_id, task_id FROM trials"
+            ).fetchone()
+        assert row == ("second", "extra", "starter-task")
+
+
+def test_io_errors_are_friendly_without_traceback() -> None:
+    with runner.isolated_filesystem():
+        result = runner.invoke(app, ["report", "--output", "missing/out.md"])
+
+        assert result.exit_code == 1
+        assert "Traceback" not in result.stdout
+
+
+def test_malformed_yaml_is_a_friendly_configuration_error() -> None:
+    with runner.isolated_filesystem():
+        Path("agentablate.yaml").write_text("agents: [", encoding="utf-8")
+
+        result = runner.invoke(app, ["doctor"])
+
+        assert result.exit_code == 1
+        assert "Traceback" not in result.stdout
+        assert "invalid YAML" in result.stdout

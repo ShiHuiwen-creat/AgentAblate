@@ -7,8 +7,15 @@ import yaml
 from agentablate.models import ExperimentBundle, ExperimentConfig, TaskSpec
 
 
+class ConfigurationError(ValueError):
+    """Raised when experiment YAML cannot be parsed or validated."""
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
-    data = yaml.safe_load(path.read_text())
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as error:
+        raise ConfigurationError(f"invalid YAML in {path}: {error}") from error
     if not isinstance(data, dict):
         raise ValueError(f"{path} must contain a YAML mapping")
     return data

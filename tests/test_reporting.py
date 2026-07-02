@@ -2,7 +2,13 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from agentablate.reporting import load_report, render_html, render_markdown
+from agentablate.reporting import (
+    load_comparison,
+    load_report,
+    render_comparison,
+    render_html,
+    render_markdown,
+)
 
 
 def _database(tmp_path: Path) -> Path:
@@ -18,13 +24,17 @@ def _database(tmp_path: Path) -> Path:
               id TEXT PRIMARY KEY, experiment TEXT NOT NULL, agent_id TEXT NOT NULL,
               variant_id TEXT NOT NULL, task_id TEXT NOT NULL, repetition INTEGER NOT NULL,
               status TEXT NOT NULL, success INTEGER, duration_seconds REAL,
-              error TEXT, config_hash TEXT NOT NULL
+              error TEXT, config_hash TEXT NOT NULL,
+              adapter_type TEXT NOT NULL, implementation_version TEXT NOT NULL
             );
             INSERT INTO experiments VALUES ('demo', 'hash-1', 'agentablate.yaml', 'now');
             INSERT INTO trials VALUES
-              ('1','demo','fake','baseline','task-b',0,'completed',1,2.0,NULL,'hash-1'),
-              ('2','demo','fake','with-skill','task-a',0,'failed',0,4.0,'timeout','hash-1'),
-              ('3','demo','fake','with-skill','task-a',1,'completed',1,6.0,NULL,'hash-1');
+              ('1','demo','fake','baseline','task-b',0,'completed',1,2.0,NULL,
+               'hash-1','fake','0.1.0.dev0'),
+              ('2','demo','fake','with-skill','task-a',0,'failed',0,4.0,'timeout',
+               'hash-1','fake','0.1.0.dev0'),
+              ('3','demo','fake','with-skill','task-a',1,'completed',1,6.0,NULL,
+               'hash-1','fake','0.1.0.dev0');
             """
         )
     return path
@@ -40,6 +50,23 @@ def test_load_report_aggregates_deterministically(tmp_path: Path) -> None:
     assert report.rows[1].failure_reasons == (("timeout", 1),)
     assert report.config_hashes == ("hash-1",)
     assert report.repetitions == 2
+    assert report.adapter_implementations == (("fake", "0.1.0.dev0"),)
+
+
+def test_comparison_reports_exact_baseline_deltas(tmp_path: Path) -> None:
+    comparison = load_comparison(_database(tmp_path))
+
+    assert len(comparison.rows) == 1
+    row = comparison.rows[0]
+    assert (row.agent_id, row.variant_id) == ("fake", "with-skill")
+    assert (row.baseline_success_count, row.baseline_trial_count) == (1, 1)
+    assert (row.variant_success_count, row.variant_trial_count) == (1, 2)
+    assert row.success_count_delta == 0
+    assert row.success_rate_delta == -0.5
+    rendered = render_comparison(comparison)
+    assert "1/1 (100.0%)" in rendered
+    assert "1/2 (50.0%)" in rendered
+    assert "-50.0 pp" in rendered
 
 
 def test_renderers_include_required_metadata_without_absolute_paths(tmp_path: Path) -> None:
@@ -69,8 +96,11 @@ def test_empty_database_and_missing_baseline_are_explicit(tmp_path: Path) -> Non
 
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
-            "INSERT INTO trials VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            ("x", "demo", "fake", "other", "task", 0, "failed", 0, 1.0, "boom", "hash-1"),
+            "INSERT INTO trials VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "x", "demo", "fake", "other", "task", 0, "failed", 0,
+                1.0, "boom", "hash-1", "fake", "0.1.0.dev0",
+            ),
         )
     no_baseline = load_report(path)
     assert no_baseline.has_baseline is False

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agentablate import __version__
 from agentablate.models import TrialSpec
 
 
@@ -46,9 +47,9 @@ class SQLiteStorage:
     def _initialize(self) -> None:
         with self._connection() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version > 3:
+            if version > 4:
                 raise RuntimeError(
-                    f"database schema version {version} is newer than supported version 3"
+                    f"database schema version {version} is newer than supported version 4"
                 )
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -80,7 +81,9 @@ class SQLiteStorage:
                     stdout TEXT NOT NULL DEFAULT '',
                     stderr TEXT NOT NULL DEFAULT '',
                     attempt_id TEXT,
-                    heartbeat_at TEXT
+                    heartbeat_at TEXT,
+                    adapter_type TEXT NOT NULL DEFAULT 'unknown (legacy)',
+                    implementation_version TEXT NOT NULL DEFAULT 'unknown (legacy)'
                     )"""
                 )
                 experiment_columns = {
@@ -106,6 +109,8 @@ class SQLiteStorage:
                     "stderr": "TEXT NOT NULL DEFAULT ''",
                     "attempt_id": "TEXT",
                     "heartbeat_at": "TEXT",
+                    "adapter_type": "TEXT NOT NULL DEFAULT 'unknown (legacy)'",
+                    "implementation_version": "TEXT NOT NULL DEFAULT 'unknown (legacy)'",
                 }
                 for name, definition in additions.items():
                     if name not in columns:
@@ -126,7 +131,7 @@ class SQLiteStorage:
                     raise RuntimeError(
                         f"trials schema is missing columns: {', '.join(sorted(missing))}"
                     )
-                connection.execute("PRAGMA user_version = 3")
+                connection.execute("PRAGMA user_version = 4")
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -171,20 +176,24 @@ class SQLiteStorage:
             json.dumps(trial.extension_hashes, separators=(",", ":")),
             attempt_id,
             _utc_now(),
+            trial.agent.adapter,
+            __version__,
         )
         connection.execute(
             """
                 INSERT INTO trials(
                     id, experiment, agent_id, variant_id, task_id, repetition,
                     status, started_at, config_hash, extension_hashes, attempt_id,
-                    heartbeat_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    heartbeat_at, adapter_type, implementation_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     status='running', success=NULL, duration_seconds=NULL,
                     exit_code=NULL, error=NULL, started_at=excluded.started_at,
                     completed_at=NULL, stdout='', stderr='',
                     attempt_id=excluded.attempt_id,
-                    heartbeat_at=excluded.heartbeat_at
+                    heartbeat_at=excluded.heartbeat_at,
+                    adapter_type=excluded.adapter_type,
+                    implementation_version=excluded.implementation_version
             """,
             values,
         )
