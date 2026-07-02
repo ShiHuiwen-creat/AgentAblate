@@ -9,6 +9,7 @@ from agentablate.experiment import (
     doctor_experiment,
     initialize_experiment,
     run_experiment,
+    starter_documents,
     write_report,
 )
 from agentablate.reporting import render_comparison
@@ -21,34 +22,12 @@ def main() -> None:
     """Benchmark coding-agent skills and MCP servers."""
 
 
-CONFIG = """version: 1
-experiment:
-  name: starter
-  repetitions: 1
-  timeout_seconds: 30
-agents:
-  - id: fake
-    adapter: fake
-variants:
-  - id: baseline
-tasks: [./task.yaml]
-"""
-TASK = """id: starter-task
-repo: ./fixture
-revision: HEAD
-prompt: Create agentablate-output.txt.
-test_command:
-  - python3
-  - -c
-  - \"import pathlib; assert pathlib.Path('agentablate-output.txt').is_file()\"
-"""
-
-
 @app.command()
 def init(directory: Path = Path("."), force: bool = False) -> None:
     """Create a starter AgentAblate experiment."""
     try:
-        initialize_experiment(directory, CONFIG, TASK, force)
+        config_text, task_text = starter_documents()
+        initialize_experiment(directory, config_text, task_text, force)
     except ApplicationError as error:
         typer.echo(str(error))
         raise typer.Exit(1) from error
@@ -86,8 +65,12 @@ def run(
     """Run an AgentAblate experiment."""
     try:
         summary = run_experiment(
-            config, agents=agent or (), variants=variant or (), tasks=task or (),
-            concurrency=concurrency, resume=resume,
+            config,
+            agents=agent or (),
+            variants=variant or (),
+            tasks=task or (),
+            concurrency=concurrency,
+            resume=resume,
         )
     except ApplicationError as error:
         typer.echo(str(error))

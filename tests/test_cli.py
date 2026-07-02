@@ -81,9 +81,7 @@ def test_run_filters_trials_and_writes_database_and_jsonl() -> None:
         assert runner.invoke(app, ["init"]).exit_code == 0
         config = Path("agentablate.yaml")
         config.write_text(
-            config.read_text().replace(
-                "- id: baseline", "- id: baseline\n  - id: extra"
-            )
+            config.read_text().replace("- id: baseline", "- id: baseline\n  - id: extra")
         )
 
         result = runner.invoke(
@@ -117,9 +115,7 @@ def test_compare_and_report_end_to_end() -> None:
         assert runner.invoke(app, ["init"]).exit_code == 0
         config = Path("agentablate.yaml")
         config.write_text(
-            config.read_text().replace(
-                "- id: baseline", "- id: baseline\n  - id: extra"
-            )
+            config.read_text().replace("- id: baseline", "- id: baseline\n  - id: extra")
         )
         assert runner.invoke(app, ["run", str(config)]).exit_code == 0
         database = ".agentablate/results.sqlite3"
@@ -149,9 +145,7 @@ def test_default_config_and_resume_recover_stale_running_trial() -> None:
         database = Path(".agentablate/results.sqlite3")
         stale = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
         with closing(sqlite3.connect(database)) as connection, connection:
-            connection.execute(
-                "UPDATE trials SET status='running', heartbeat_at=?", (stale,)
-            )
+            connection.execute("UPDATE trials SET status='running', heartbeat_at=?", (stale,))
 
         blocked = runner.invoke(app, ["run", "--no-resume"])
         recovered = runner.invoke(app, ["run", "--resume"])
@@ -182,9 +176,7 @@ def test_combined_agent_variant_and_task_filters() -> None:
 
         assert result.exit_code == 0, (result.stdout, result.exception)
         with closing(sqlite3.connect(".agentablate/results.sqlite3")) as connection:
-            row = connection.execute(
-                "SELECT agent_id, variant_id, task_id FROM trials"
-            ).fetchone()
+            row = connection.execute("SELECT agent_id, variant_id, task_id FROM trials").fetchone()
         assert row == ("second", "extra", "starter-task")
 
 
@@ -205,3 +197,15 @@ def test_malformed_yaml_is_a_friendly_configuration_error() -> None:
         assert result.exit_code == 1
         assert "Traceback" not in result.stdout
         assert "invalid YAML" in result.stdout
+
+
+def test_report_output_error_uses_application_error_boundary() -> None:
+    with runner.isolated_filesystem():
+        assert runner.invoke(app, ["init"]).exit_code == 0
+        assert runner.invoke(app, ["run"]).exit_code == 0
+        Path("blocked").write_text("not a directory", encoding="utf-8")
+
+        result = runner.invoke(app, ["report", "--output", "blocked/report.md"])
+
+        assert result.exit_code == 1
+        assert "Traceback" not in result.stdout

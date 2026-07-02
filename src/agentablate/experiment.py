@@ -1,10 +1,15 @@
 import asyncio
+import os
 import shutil
 import sqlite3
+import sys
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from agentablate.adapters.base import AgentAdapter
 from agentablate.adapters.command import CommandAdapter
@@ -52,7 +57,7 @@ def _adapter(agent: AgentConfig) -> AgentAdapter:
     raise ApplicationError(f"adapter is not available in Phase 1: {agent.adapter}")
 
 
-def doctor_experiment(
+async def doctor_experiment_async(
     config: Path,
     *,
     loader: Loader = load_experiment,
@@ -61,21 +66,40 @@ def doctor_experiment(
     try:
         bundle = loader(config)
 
-        async def check() -> tuple[DoctorResult, ...]:
-            results = []
-            for agent in bundle.config.agents:
-                available, detail = await adapter_factory(agent).doctor()
-                results.append(DoctorResult(agent.id, available, detail))
-            return tuple(results)
-
-        return asyncio.run(check())
+        results = []
+        for agent in bundle.config.agents:
+            available, detail = await adapter_factory(agent).doctor()
+            results.append(DoctorResult(agent.id, available, detail))
+        return tuple(results)
     except ApplicationError:
         raise
-    except (OSError, ValueError, WorkspaceError) as error:
+    except (OSError, ValueError, WorkspaceError, RuntimeError) as error:
         raise ApplicationError(str(error)) from error
 
 
-def run_experiment(
+def _require_sync_context() -> None:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise ApplicationError(
+        "synchronous workflow cannot run inside a running event loop; use the async API"
+    )
+
+
+def doctor_experiment(
+    config: Path,
+    *,
+    loader: Loader = load_experiment,
+    adapter_factory: Callable[[AgentConfig], AgentAdapter] = _adapter,
+) -> tuple[DoctorResult, ...]:
+    _require_sync_context()
+    return asyncio.run(
+        doctor_experiment_async(config, loader=loader, adapter_factory=adapter_factory)
+    )
+
+
+async def run_experiment_async(
     config: Path,
     *,
     agents: Iterable[str] = (),
@@ -105,7 +129,7 @@ def run_experiment(
         root = bundle.source.parent
         storage = SQLiteStorage(root / ".agentablate" / "results.sqlite3")
         runner = runner_factory(root, storage, recover_running=resume)
-        rows = asyncio.run(runner.run_all(trials, concurrency))
+        rows = await runner.run_all(trials, concurrency)
         return RunSummary(len(rows), sum(row.get("status") != "completed" for row in rows))
     except ApplicationError:
         raise
@@ -113,10 +137,40 @@ def run_experiment(
         raise ApplicationError(str(error)) from error
 
 
+def run_experiment(
+    config: Path,
+    *,
+    agents: Iterable[str] = (),
+    variants: Iterable[str] = (),
+    tasks: Iterable[str] = (),
+    concurrency: int = 1,
+    resume: bool = True,
+    loader: Loader = load_experiment,
+    matrix_expander: MatrixExpander = expand_matrix,
+    runner_factory: Callable[..., Any] = TrialRunner,
+    allow_empty: bool = False,
+) -> RunSummary:
+    _require_sync_context()
+    return asyncio.run(
+        run_experiment_async(
+            config,
+            agents=agents,
+            variants=variants,
+            tasks=tasks,
+            concurrency=concurrency,
+            resume=resume,
+            loader=loader,
+            matrix_expander=matrix_expander,
+            runner_factory=runner_factory,
+            allow_empty=allow_empty,
+        )
+    )
+
+
 def compare_results(database: Path) -> Comparison:
     try:
         return load_comparison(database)
-    except (OSError, sqlite3.Error) as error:
+    except (OSError, sqlite3.Error, RuntimeError) as error:
         raise ApplicationError(str(error)) from error
 
 
@@ -126,7 +180,7 @@ def write_report(database: Path, destination: Path, format: str) -> None:
         rendered = render_markdown(report) if format == "markdown" else render_html(report)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(rendered, encoding="utf-8")
-    except (OSError, sqlite3.Error) as error:
+    except (OSError, sqlite3.Error, RuntimeError) as error:
         raise ApplicationError(str(error)) from error
 
 
@@ -135,23 +189,68 @@ def initialize_experiment(directory: Path, config_text: str, task_text: str, for
     existing = [path.name for path in targets if path.exists()]
     if existing and not force:
         raise ApplicationError(f"Refusing to overwrite; already exists: {', '.join(existing)}")
-    staging = directory / ".agentablate-init-tmp"
+    staging: Path | None = None
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir()
-        initialize_fixture_repository(staging / "fixture")
-        (staging / "agentablate.yaml").write_text(config_text, encoding="utf-8")
-        (staging / "task.yaml").write_text(task_text, encoding="utf-8")
-        for target in targets:
-            if target.is_dir():
-                shutil.rmtree(target)
-            elif target.exists():
-                target.unlink()
-            (staging / target.name).replace(target)
-        staging.rmdir()
+        staging = Path(tempfile.mkdtemp(prefix=".agentablate-init-", dir=directory))
+        payload, backup = staging / "payload", staging / "backup"
+        payload.mkdir()
+        backup.mkdir()
+        initialize_fixture_repository(payload / "fixture")
+        (payload / "agentablate.yaml").write_text(config_text, encoding="utf-8")
+        (payload / "task.yaml").write_text(task_text, encoding="utf-8")
+        moved: list[Path] = []
+        installed: list[Path] = []
+        try:
+            for target in targets:
+                if target.exists():
+                    os.replace(target, backup / target.name)
+                    moved.append(target)
+            for target in targets:
+                (payload / target.name).replace(target)
+                installed.append(target)
+        except OSError:
+            for target in reversed(installed):
+                if target.is_dir():
+                    shutil.rmtree(target)
+                elif target.exists():
+                    target.unlink()
+            for target in reversed(moved):
+                os.replace(backup / target.name, target)
+            raise
     except (OSError, WorkspaceError) as error:
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
         raise ApplicationError(f"Initialization failed: {error}") from error
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def starter_documents(python_executable: str | None = None) -> tuple[str, str]:
+    executable = python_executable or sys.executable
+    config = {
+        "version": 1,
+        "experiment": {"name": "starter", "repetitions": 1, "timeout_seconds": 30},
+        "agents": [{"id": "fake", "adapter": "fake"}],
+        "variants": [{"id": "baseline"}],
+        "tasks": ["./task.yaml"],
+    }
+    task = {
+        "id": "starter-task",
+        "repo": "./fixture",
+        "revision": "HEAD",
+        "prompt": "Create agentablate-output.txt.",
+        "test_command": [
+            executable,
+            "-c",
+            "import pathlib; assert pathlib.Path('agentablate-output.txt').is_file()",
+        ],
+    }
+
+    class IndentedSafeDumper(yaml.SafeDumper):
+        def increase_indent(self, flow: bool = False, indentless: bool = False):
+            return super().increase_indent(flow, indentless=False)
+
+    return (
+        yaml.dump(config, Dumper=IndentedSafeDumper, sort_keys=False),
+        yaml.dump(task, Dumper=IndentedSafeDumper, sort_keys=False),
+    )
