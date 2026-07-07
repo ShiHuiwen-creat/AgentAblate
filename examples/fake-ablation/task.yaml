@@ -1,0 +1,8 @@
+id: create-output
+repo: ./fixture
+revision: HEAD
+prompt: Create agentablate-output.txt.
+test_command:
+  - python
+  - -c
+  - "from pathlib import Path; assert Path('agentablate-output.txt').is_file()"

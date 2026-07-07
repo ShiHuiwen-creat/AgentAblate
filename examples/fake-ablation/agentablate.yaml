@@ -1,0 +1,15 @@
+version: 1
+experiment:
+  name: fake-skill-ablation
+  repetitions: 1
+  timeout_seconds: 30
+agents:
+  - id: fake
+    adapter: fake
+variants:
+  - id: baseline
+  - id: with-skill
+    skills:
+      - ./skill
+tasks:
+  - ./task.yaml

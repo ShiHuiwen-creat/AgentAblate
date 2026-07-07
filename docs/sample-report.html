@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentAblate sample report</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 64rem; padding: 0 1rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ccc; padding: .5rem; text-align: left; }
+    th { background: #f5f5f5; }
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h1>AgentAblate sample report</h1>
+  <p>This checked-in report illustrates the deterministic fake-adapter example.</p>
+  <p>Config hash: <code>fec504b5f3136666324b7a36c7b11bd1c2d29b9c105a783fc3270ed8cb2ad899</code><br>
+    Adapter implementation/version: fake / 0.1.0.dev0<br>Repetitions: 1</p>
+  <table>
+    <thead><tr><th>Agent</th><th>Variant</th><th>Task</th><th>Success</th><th>Success rate</th></tr></thead>
+    <tbody>
+      <tr><td>fake</td><td>baseline</td><td>create-output</td><td>1/1</td><td>100.0%</td></tr>
+      <tr><td>fake</td><td>with-skill</td><td>create-output</td><td>1/1</td><td>100.0%</td></tr>
+    </tbody>
+  </table>
+  <p>The equal result is intentional: the fake adapter validates the ablation pipeline,
+    not the skill's effect on a real model.</p>
+</body>
+</html>
