@@ -1,5 +1,4 @@
 import shutil
-import sys
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -14,11 +13,6 @@ def test_fake_ablation_example_runs_and_reports_both_variants(
     source = Path(__file__).parents[1] / "examples" / "fake-ablation"
     example = tmp_path / "fake-ablation"
     shutil.copytree(source, example)
-    task = example / "task.yaml"
-    task.write_text(
-        task.read_text(encoding="utf-8").replace("  - python\n", f"  - {sys.executable}\n"),
-        encoding="utf-8",
-    )
     initialize_fixture_repository(example / "fixture")
     monkeypatch.chdir(example)
 

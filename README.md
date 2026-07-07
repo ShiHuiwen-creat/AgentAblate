@@ -41,9 +41,11 @@ cd examples/fake-ablation
 
 Without uv, create a standard environment with `python -m venv .venv`, activate it,
 and run `python -m pip install -e '.[dev]'`. On Windows, invoke
-`..\\..\\.venv\\Scripts\\agentablate` in the final commands. The example's test
-uses the `python` launcher from `PATH`, so keep the activated environment first.
-The fixture's nested `.git` directory is local setup and must not be committed.
+`..\\..\\.venv\\Scripts\\agentablate` in the final commands. In task commands, an
+argument exactly equal to `{python}` resolves to the interpreter running
+AgentAblate; no activation or platform-specific Python path is needed. Text that
+merely contains `{python}` is left unchanged. The fixture's nested `.git` directory
+is local setup and must not be committed.
 
 ## Baseline versus skill
 

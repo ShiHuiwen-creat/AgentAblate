@@ -49,6 +49,23 @@ async def test_exit_code_zero_is_successful(workspace: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_python_placeholder_uses_current_interpreter_without_formatting_arguments(
+    workspace: Path,
+) -> None:
+    task = TaskSpec(
+        id="portable-python",
+        repo=workspace,
+        prompt="Run a portable Python command.",
+        test_command=("{python}", "-c", "print('{python}')"),
+    )
+
+    result = await evaluate(task, workspace, timeout_seconds=1)
+
+    assert result.success is True
+    assert result.stdout == "{python}\n"
+
+
+@pytest.mark.asyncio
 async def test_exit_code_one_returns_failure_details(workspace: Path) -> None:
     script = "import sys; print('failed out'); print('details', file=sys.stderr); sys.exit(1)"
 

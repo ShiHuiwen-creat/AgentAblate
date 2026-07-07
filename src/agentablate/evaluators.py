@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,8 +67,12 @@ async def evaluate(
     allowed_env: tuple[str, ...] = (),
 ) -> EvaluationResult:
     """Run a task's deterministic test command and record its Git changes."""
+    command = tuple(
+        sys.executable if argument == "{python}" else argument
+        for argument in task.test_command
+    )
     process = await create_process(
-        task.test_command,
+        command,
         cwd=workspace,
         env=minimal_environment(allowed_env),
     )

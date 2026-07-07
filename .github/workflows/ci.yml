@@ -23,3 +23,36 @@ jobs:
       - run: python -m pip install -e '.[dev]'
       - run: ruff check .
       - run: pytest --cov=agentablate --cov-report=term-missing --cov-fail-under=90
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install build
+      - run: python -m build
+      - name: Verify wheel contents
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheel = next(Path("dist").glob("*.whl"))
+          with ZipFile(wheel) as archive:
+              assert "agentablate/templates/report.html.j2" in archive.namelist()
+          PY
+      - name: Install and smoke-test wheel
+        run: |
+          python -m venv /tmp/agentablate-wheel
+          /tmp/agentablate-wheel/bin/python -m pip install dist/*.whl
+          /tmp/agentablate-wheel/bin/agentablate --help
+          git -C examples/fake-ablation/fixture init
+          git -C examples/fake-ablation/fixture config user.name AgentAblate
+          git -C examples/fake-ablation/fixture config user.email agentablate@example.invalid
+          git -C examples/fake-ablation/fixture add README.md
+          git -C examples/fake-ablation/fixture commit -m "Initial fixture"
+          /tmp/agentablate-wheel/bin/agentablate doctor \
+            examples/fake-ablation/agentablate.yaml
