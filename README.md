@@ -9,8 +9,9 @@ repeatable, and easy to inspect.
 ## See the result
 
 Open the checked-in [sample Markdown report](docs/sample-report.md) or
-[sample HTML report](docs/sample-report.html). They show the same deterministic
-fake-adapter run used in the quickstart below.
+[sample HTML report](docs/sample-report.html). These representative files are
+golden-tested against the current renderers and use the fake-adapter experiment
+from the quickstart below; measured duration varies by machine.
 
 | Variant | Success |
 |---|---:|
@@ -76,6 +77,12 @@ to an immutable Git commit OID, fingerprints skill and MCP content, and receives
 deterministic ID from its inputs. Runs happen in detached disposable Git worktrees.
 Structured trial state is stored in SQLite and event streams in append-only JSONL,
 so interrupted runs can be resumed and raw evidence remains inspectable.
+
+The `{python}` placeholder is portable across operating systems, but portability
+does not erase environment differences. Trial identity includes the AgentAblate
+version, evaluator schema, Python implementation and full version, and platform
+system and machine. A different evaluator environment therefore produces a new
+trial ID, preventing `--resume` from reusing a result measured elsewhere.
 
 AgentAblate does not yet calculate confidence intervals or claim statistical
 significance. Use enough tasks and repetitions for the question you are studying,

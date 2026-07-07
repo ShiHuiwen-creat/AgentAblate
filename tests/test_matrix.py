@@ -139,3 +139,22 @@ def test_expand_matrix_binds_revision_to_commit_oid(bundle: ExperimentBundle) ->
 
     assert trial.task.revision == expected
     assert len(trial.task.revision) == 40
+
+
+def test_evaluator_environment_changes_trial_identity(
+    bundle: ExperimentBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "agentablate.matrix.evaluator_environment_identity",
+        lambda: {"python_version": "3.12.1", "schema": 1},
+    )
+    first = expand_matrix(bundle)
+    monkeypatch.setattr(
+        "agentablate.matrix.evaluator_environment_identity",
+        lambda: {"python_version": "3.13.0", "schema": 1},
+    )
+    second = expand_matrix(bundle)
+
+    assert first[0].evaluator_hash
+    assert first[0].evaluator_hash != second[0].evaluator_hash
+    assert first[0].id != second[0].id

@@ -5,12 +5,31 @@ from pathlib import Path
 import pytest
 
 from agentablate.reporting import (
+    Report,
+    ReportRow,
     load_comparison,
     load_report,
     render_comparison,
     render_html,
     render_markdown,
 )
+
+
+def test_checked_in_sample_reports_match_current_renderers() -> None:
+    report = Report(
+        rows=(
+            ReportRow("fake", "baseline", ("create-output",), 1, 1, 1.0, 0.001, ()),
+            ReportRow("fake", "with-skill", ("create-output",), 1, 1, 1.0, 0.002, ()),
+        ),
+        config_hashes=("fec504b5f3136666324b7a36c7b11bd1c2d29b9c105a783fc3270ed8cb2ad899",),
+        repetitions=1,
+        has_baseline=True,
+        adapter_implementations=(("fake", "0.1.0.dev0"),),
+    )
+    root = Path(__file__).parents[1]
+
+    assert (root / "docs/sample-report.md").read_text() == render_markdown(report)
+    assert (root / "docs/sample-report.html").read_text() == render_html(report)
 
 
 def _database(tmp_path: Path) -> Path:
@@ -338,4 +357,4 @@ def test_reporting_migrates_v3_database_before_query(tmp_path: Path, loader) -> 
     loader(path)
 
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5

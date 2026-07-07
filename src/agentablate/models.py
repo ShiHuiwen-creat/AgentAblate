@@ -75,3 +75,4 @@ class TrialSpec(FrozenModel):
     timeout_seconds: int
     config_hash: str
     extension_hashes: tuple[str, ...]
+    evaluator_hash: str = ""

@@ -2,6 +2,10 @@ import hashlib
 import json
 from pathlib import Path
 
+from agentablate.identity import (
+    evaluator_environment_hash,
+    evaluator_environment_identity,
+)
 from agentablate.models import ExperimentBundle, TrialSpec
 from agentablate.workspace import resolve_revision
 
@@ -44,6 +48,7 @@ def _trial_id(payload: dict[str, object]) -> str:
 def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
     trials: list[TrialSpec] = []
     meta = bundle.config.experiment
+    evaluator_hash = evaluator_environment_hash(evaluator_environment_identity())
     for task in bundle.tasks:
         resolved_task = task.model_copy(
             update={"revision": resolve_revision(task.repo, task.revision)}
@@ -72,6 +77,7 @@ def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
                             "test_command": resolved_task.test_command,
                         },
                         "repetition": repetition,
+                        "evaluator_hash": evaluator_hash,
                     }
                     trials.append(
                         TrialSpec(
@@ -84,6 +90,7 @@ def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
                             timeout_seconds=meta.timeout_seconds,
                             config_hash=bundle.config_hash,
                             extension_hashes=extension_hashes,
+                            evaluator_hash=evaluator_hash,
                         )
                     )
     return trials

@@ -24,6 +24,7 @@ def _trial(tmp_path: Path) -> TrialSpec:
         timeout_seconds=1,
         config_hash="config-hash",
         extension_hashes=("extension-hash",),
+        evaluator_hash="evaluator-hash",
     )
 
 
@@ -60,6 +61,7 @@ def test_storage_records_portable_experiment_and_completed_trial(tmp_path: Path)
     assert row["extension_hashes"] == '["extension-hash"]'
     assert row["adapter_type"] == "fake"
     assert row["implementation_version"] == "0.1.0.dev0"
+    assert row["evaluator_hash"] == trial.evaluator_hash
     assert storage.is_completed(trial.id)
     assert str(tmp_path) not in repr(experiment) + repr(row)
 
@@ -172,17 +174,18 @@ def test_storage_migrates_legacy_schema_before_writing(tmp_path: Path) -> None:
     assert row["config_hash"] == trial.config_hash
     assert row["stdout"] == "out"
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(trials)")
         }
     assert "implementation_version" in columns
+    assert "evaluator_hash" in columns
 
 
 def test_storage_rejects_newer_schema_version(tmp_path: Path) -> None:
     path = tmp_path / "future.sqlite3"
     with closing(sqlite3.connect(path)) as connection:
-        connection.execute("PRAGMA user_version = 5")
+        connection.execute("PRAGMA user_version = 6")
 
     with pytest.raises(RuntimeError, match="newer than supported"):
         SQLiteStorage(path)

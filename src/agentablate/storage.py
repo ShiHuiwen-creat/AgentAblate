@@ -47,9 +47,9 @@ class SQLiteStorage:
     def _initialize(self) -> None:
         with self._connection() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version > 4:
+            if version > 5:
                 raise RuntimeError(
-                    f"database schema version {version} is newer than supported version 4"
+                    f"database schema version {version} is newer than supported version 5"
                 )
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -83,7 +83,8 @@ class SQLiteStorage:
                     attempt_id TEXT,
                     heartbeat_at TEXT,
                     adapter_type TEXT NOT NULL DEFAULT 'unknown (legacy)',
-                    implementation_version TEXT NOT NULL DEFAULT 'unknown (legacy)'
+                    implementation_version TEXT NOT NULL DEFAULT 'unknown (legacy)',
+                    evaluator_hash TEXT NOT NULL DEFAULT ''
                     )"""
                 )
                 experiment_columns = {
@@ -111,6 +112,7 @@ class SQLiteStorage:
                     "heartbeat_at": "TEXT",
                     "adapter_type": "TEXT NOT NULL DEFAULT 'unknown (legacy)'",
                     "implementation_version": "TEXT NOT NULL DEFAULT 'unknown (legacy)'",
+                    "evaluator_hash": "TEXT NOT NULL DEFAULT ''",
                 }
                 for name, definition in additions.items():
                     if name not in columns:
@@ -131,7 +133,7 @@ class SQLiteStorage:
                     raise RuntimeError(
                         f"trials schema is missing columns: {', '.join(sorted(missing))}"
                     )
-                connection.execute("PRAGMA user_version = 4")
+                connection.execute("PRAGMA user_version = 5")
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -178,14 +180,16 @@ class SQLiteStorage:
             _utc_now(),
             trial.agent.adapter,
             __version__,
+            trial.evaluator_hash,
         )
         connection.execute(
             """
                 INSERT INTO trials(
                     id, experiment, agent_id, variant_id, task_id, repetition,
                     status, started_at, config_hash, extension_hashes, attempt_id,
-                    heartbeat_at, adapter_type, implementation_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    heartbeat_at, adapter_type, implementation_version,
+                    evaluator_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     status='running', success=NULL, duration_seconds=NULL,
                     exit_code=NULL, error=NULL, started_at=excluded.started_at,
