@@ -85,7 +85,7 @@ def load_report(database: Path) -> Report:
                FROM trials AS t
                JOIN experiments AS e
                  ON e.name = t.experiment AND e.config_hash = t.config_hash
-               WHERE t.status = 'completed'
+               WHERE t.status IN ('completed', 'failed')
                ORDER BY agent_id, variant_id, task_id, repetition, id"""
         ).fetchall()
 
@@ -134,7 +134,7 @@ def load_comparison(database: Path) -> Comparison:
                FROM trials AS t
                JOIN experiments AS e
                  ON e.name = t.experiment AND e.config_hash = t.config_hash
-               WHERE t.status = 'completed'
+               WHERE t.status IN ('completed', 'failed')
                ORDER BY t.experiment, t.config_hash, t.agent_id, t.variant_id,
                         t.task_id, t.repetition, t.id"""
         ).fetchall()

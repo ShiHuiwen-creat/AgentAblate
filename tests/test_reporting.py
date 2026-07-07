@@ -37,7 +37,7 @@ def _database(tmp_path: Path) -> Path:
             ) VALUES
               ('1','demo','fake','baseline','task-a',0,'completed',1,2.0,NULL,
                'hash-1','fake','0.1.0.dev0'),
-              ('2','demo','fake','with-skill','task-a',0,'completed',0,4.0,'timeout',
+              ('2','demo','fake','with-skill','task-a',0,'failed',0,4.0,'timeout',
                'hash-1','fake','0.1.0.dev0'),
               ('3','demo','fake','with-skill','task-a',1,'completed',1,6.0,NULL,
                'hash-1','fake','0.1.0.dev0');
@@ -119,7 +119,7 @@ def test_empty_database_and_missing_baseline_are_explicit(tmp_path: Path) -> Non
                 "other",
                 "task",
                 0,
-                "completed",
+                "failed",
                 0,
                 1.0,
                 "boom",
@@ -133,7 +133,7 @@ def test_empty_database_and_missing_baseline_are_explicit(tmp_path: Path) -> Non
     assert "No baseline variant" in render_markdown(no_baseline)
 
 
-def test_report_uses_only_completed_trials_from_current_experiment_config(tmp_path: Path) -> None:
+def test_report_uses_only_terminal_trials_from_current_experiment_config(tmp_path: Path) -> None:
     path = _database(tmp_path)
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("UPDATE experiments SET config_hash='current'")
@@ -215,7 +215,7 @@ def test_comparison_pairs_only_common_task_repetitions(tmp_path: Path) -> None:
                 "skill",
                 "same",
                 0,
-                "completed",
+                "failed",
                 0,
                 1.0,
                 None,
