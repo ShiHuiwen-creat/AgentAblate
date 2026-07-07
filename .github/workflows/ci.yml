@@ -72,17 +72,32 @@ jobs:
         run: |
           $venv = Join-Path $env:RUNNER_TEMP "agentablate-wheel"
           python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw "Failed to create wheel test environment" }
           $python = Join-Path $venv "Scripts/python.exe"
           $agentablate = Join-Path $venv "Scripts/agentablate.exe"
           $wheel = Get-ChildItem "dist/*.whl" | Select-Object -First 1
           & $python -m pip install $wheel.FullName
+          if ($LASTEXITCODE -ne 0) { throw "Failed to install wheel" }
           & $agentablate --help
+          if ($LASTEXITCODE -ne 0) { throw "Installed console script failed" }
           git -C examples/fake-ablation/fixture init
+          if ($LASTEXITCODE -ne 0) { throw "Failed to initialize fixture" }
           git -C examples/fake-ablation/fixture config user.name AgentAblate
+          if ($LASTEXITCODE -ne 0) { throw "Failed to configure fixture name" }
           git -C examples/fake-ablation/fixture config user.email agentablate@example.invalid
+          if ($LASTEXITCODE -ne 0) { throw "Failed to configure fixture email" }
           git -C examples/fake-ablation/fixture add README.md
+          if ($LASTEXITCODE -ne 0) { throw "Failed to stage fixture" }
           git -C examples/fake-ablation/fixture commit -m "Initial fixture"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to commit fixture" }
           & $agentablate doctor examples/fake-ablation/agentablate.yaml
+          if ($LASTEXITCODE -ne 0) { throw "Example doctor failed" }
           & $agentablate run examples/fake-ablation/agentablate.yaml
-          & $agentablate report examples/fake-ablation/.agentablate/results.sqlite3 `
-            --format markdown --output "$env:RUNNER_TEMP/agentablate-report.md"
+          if ($LASTEXITCODE -ne 0) { throw "Example run failed" }
+          $reportPath = Join-Path $env:RUNNER_TEMP "agentablate-report.md"
+          & $agentablate report examples/fake-ablation/.agentablate/results.sqlite3 --format markdown --output $reportPath
+          if ($LASTEXITCODE -ne 0) { throw "Example report failed" }
+          if (-not (Test-Path $reportPath)) { throw "Example report was not created" }
+          $report = Get-Content $reportPath -Raw
+          if (-not $report.Contains("baseline")) { throw "Report is missing baseline" }
+          if (-not $report.Contains("with-skill")) { throw "Report is missing with-skill" }
