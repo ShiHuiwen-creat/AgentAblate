@@ -65,3 +65,27 @@ tasks: []
 
     with pytest.raises(ValidationError, match="duplicate agent id"):
         load_experiment(config)
+
+
+def test_rejects_task_with_empty_test_command(tmp_path: Path) -> None:
+    (tmp_path / "task.yaml").write_text(
+        """
+id: empty-command
+repo: ./fixture
+prompt: Test the project.
+test_command: []
+""".strip()
+    )
+    config = tmp_path / "agentablate.yaml"
+    config.write_text(
+        """
+version: 1
+experiment: {name: demo}
+agents: [{id: fake, adapter: fake}]
+variants: [{id: baseline}]
+tasks: [./task.yaml]
+""".strip()
+    )
+
+    with pytest.raises(ValidationError, match="test_command"):
+        load_experiment(config)

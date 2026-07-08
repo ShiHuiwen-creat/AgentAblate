@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agentablate.adapters.base import AdapterResult, AdapterTimeout, AgentEvent
+from agentablate.adapters.command import CommandAdapter
 from agentablate.evaluators import EvaluationResult
 from agentablate.models import AgentConfig, TaskSpec, TrialSpec, VariantConfig
 from agentablate.runner import TrialRunner
@@ -460,6 +461,156 @@ async def test_failure_error_redacts_workspace_paths(tmp_path: Path) -> None:
 
     assert str(tmp_path) not in row["error"]
     assert "<root>" in row["error"]
+
+
+@pytest.mark.asyncio
+async def test_runner_redacts_allowed_environment_secret_from_all_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "service-token-value-unique"
+    script = (
+        "import os; value=os.environ['SERVICE_TOKEN']; "
+        "print(value); print(value, file=__import__('sys').stderr)"
+    )
+    trial = _trial(tmp_path, adapter="command").model_copy(
+        update={
+            "agent": AgentConfig(
+                id="command",
+                adapter="command",
+                command=(sys.executable, "-c", script),
+            )
+        }
+    )
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        adapters={
+            "command": lambda trial: CommandAdapter(
+                trial.agent.command or (), allowed_env=("SERVICE_TOKEN",)
+            )
+        },
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, []
+        ),
+        evaluator=lambda *args: asyncio.sleep(
+            0, result=EvaluationResult(True, 0, "", "", ())
+        ),
+    )
+    monkeypatch.setenv("SERVICE_TOKEN", secret)
+
+    row = await runner.run_trial(trial)
+    jsonl = runner.events_path(trial.id).read_text()
+
+    assert secret not in row["stdout"] + row["stderr"] + jsonl
+    assert "[REDACTED]" in row["stdout"]
+    assert "[REDACTED]" in row["stderr"]
+
+
+@pytest.mark.asyncio
+async def test_runner_recursively_redacts_secret_event_keys_and_preserves_plain_text(
+    tmp_path: Path,
+) -> None:
+    event = AgentEvent(
+        "message",
+        1.0,
+        {
+            "nested": {
+                "api_KEY": "hidden",
+                "monkey": "banana",
+                "label": "ordinary text",
+            }
+        },
+    )
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        adapters={
+            "fake": lambda trial: RecordingAdapter(
+                [], AdapterResult(0, (event,), "ordinary text", "")
+            )
+        },
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, []
+        ),
+        evaluator=lambda *args: asyncio.sleep(
+            0, result=EvaluationResult(True, 0, "", "", ())
+        ),
+    )
+
+    row = await runner.run_trial(_trial(tmp_path))
+    evidence = json.loads(runner.events_path("trial-1").read_text())
+
+    assert evidence["data"]["nested"] == {
+        "api_KEY": "[REDACTED]",
+        "monkey": "banana",
+        "label": "ordinary text",
+    }
+    assert row["stdout"] == "ordinary text"
+
+
+@pytest.mark.asyncio
+async def test_nonzero_adapter_result_fails_without_running_evaluator(
+    tmp_path: Path,
+) -> None:
+    evaluator_called = False
+
+    async def evaluator(*args: object) -> EvaluationResult:
+        nonlocal evaluator_called
+        evaluator_called = True
+        return EvaluationResult(True, 0, "would pass", "", ())
+
+    adapter_result = AdapterResult(7, (), "partial output", "agent failed")
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        adapters={"fake": lambda trial: RecordingAdapter([], adapter_result)},
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, []
+        ),
+        evaluator=evaluator,
+    )
+
+    row = await runner.run_trial(_trial(tmp_path))
+
+    assert row["status"] == "failed"
+    assert row["success"] == 0
+    assert row["exit_code"] == 7
+    assert row["stdout"] == "partial output"
+    assert row["stderr"] == "agent failed"
+    assert row["error"].startswith("AdapterExecutionError:")
+    assert not evaluator_called
+
+
+@pytest.mark.asyncio
+async def test_nonzero_command_adapter_cannot_be_washed_clean_by_evaluator(
+    tmp_path: Path,
+) -> None:
+    trial = _trial(tmp_path, adapter="command").model_copy(
+        update={
+            "agent": AgentConfig(
+                id="command",
+                adapter="command",
+                command=(sys.executable, "-c", "raise SystemExit(9)"),
+            )
+        }
+    )
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
+            repo, revision, path, []
+        ),
+        evaluator=lambda *args: asyncio.sleep(
+            0, result=EvaluationResult(True, 0, "", "", ())
+        ),
+    )
+
+    row = await runner.run_trial(trial)
+
+    assert row["status"] == "failed"
+    assert row["success"] == 0
+    assert row["exit_code"] == 9
+    assert row["error"].startswith("AdapterExecutionError:")
 
 
 @pytest.mark.asyncio

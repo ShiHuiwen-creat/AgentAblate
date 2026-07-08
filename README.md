@@ -79,10 +79,17 @@ Structured trial state is stored in SQLite and event streams in append-only JSON
 so interrupted runs can be resumed and raw evidence remains inspectable.
 
 The `{python}` placeholder is portable across operating systems, but portability
-does not erase environment differences. Trial identity includes the AgentAblate
-version, evaluator schema, Python implementation and full version, and platform
-system and machine. A different evaluator environment therefore produces a new
-trial ID, preventing `--resume` from reusing a result measured elsewhere.
+does not erase environment differences. Trial identity captures the AgentAblate and
+evaluator schema versions, Python implementation and full version, platform
+release/version, a normalized installed Python-distribution snapshot hash, and the
+resolved evaluator executable's portable name and content hash. For Python `-m`
+evaluators it also records the corresponding distribution version when discoverable.
+Changes to this captured identity produce a new trial ID, preventing `--resume` from
+reusing mismatched evidence.
+
+External services and unobserved environment state are not captured automatically.
+Represent those changes with a new configuration or repetition when they may affect
+results.
 
 AgentAblate does not yet calculate confidence intervals or claim statistical
 significance. Use enough tasks and repetitions for the question you are studying,

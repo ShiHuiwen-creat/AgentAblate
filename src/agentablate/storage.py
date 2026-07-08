@@ -197,7 +197,8 @@ class SQLiteStorage:
                     attempt_id=excluded.attempt_id,
                     heartbeat_at=excluded.heartbeat_at,
                     adapter_type=excluded.adapter_type,
-                    implementation_version=excluded.implementation_version
+                    implementation_version=excluded.implementation_version,
+                    evaluator_hash=excluded.evaluator_hash
             """,
             values,
         )

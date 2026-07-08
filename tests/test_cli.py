@@ -199,6 +199,26 @@ def test_malformed_yaml_is_a_friendly_configuration_error() -> None:
         assert "invalid YAML" in result.stdout
 
 
+def test_empty_test_command_is_a_friendly_configuration_error() -> None:
+    with runner.isolated_filesystem():
+        assert runner.invoke(app, ["init"]).exit_code == 0
+        task = Path("task.yaml")
+        task.write_text(
+            """
+id: starter-task
+repo: ./fixture
+prompt: Test the project.
+test_command: []
+""".strip()
+        )
+
+        result = runner.invoke(app, ["doctor"])
+
+        assert result.exit_code == 1
+        assert "test_command" in result.stdout
+        assert "Traceback" not in result.stdout
+
+
 def test_report_output_error_uses_application_error_boundary() -> None:
     with runner.isolated_filesystem():
         assert runner.invoke(app, ["init"]).exit_code == 0

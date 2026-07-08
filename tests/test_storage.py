@@ -81,6 +81,17 @@ def test_storage_restarts_incomplete_trial_and_uses_utc_timestamps(tmp_path: Pat
     assert restarted["started_at"].endswith("+00:00")
 
 
+def test_storage_retry_updates_evaluator_hash(tmp_path: Path) -> None:
+    storage = SQLiteStorage(tmp_path / "runs.sqlite3")
+    original = _trial(tmp_path)
+    storage.start_trial(original)
+    changed = original.model_copy(update={"evaluator_hash": "new-evaluator-hash"})
+
+    storage.start_trial(changed)
+
+    assert storage.get_trial(changed.id)["evaluator_hash"] == "new-evaluator-hash"
+
+
 def test_claim_is_atomic_and_running_requires_explicit_recovery(tmp_path: Path) -> None:
     storage = SQLiteStorage(tmp_path / "runs.sqlite3")
     trial = _trial(tmp_path)

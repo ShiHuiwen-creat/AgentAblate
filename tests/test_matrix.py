@@ -141,20 +141,69 @@ def test_expand_matrix_binds_revision_to_commit_oid(bundle: ExperimentBundle) ->
     assert len(trial.task.revision) == 40
 
 
-def test_evaluator_environment_changes_trial_identity(
+def test_evaluator_identity_changes_trial_identity(
     bundle: ExperimentBundle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "agentablate.matrix.evaluator_environment_identity",
-        lambda: {"python_version": "3.12.1", "schema": 1},
+        "agentablate.matrix.evaluator_identity",
+        lambda command: {"executable_sha256": "first", "schema": 2},
     )
     first = expand_matrix(bundle)
     monkeypatch.setattr(
-        "agentablate.matrix.evaluator_environment_identity",
-        lambda: {"python_version": "3.13.0", "schema": 1},
+        "agentablate.matrix.evaluator_identity",
+        lambda command: {"executable_sha256": "second", "schema": 2},
     )
     second = expand_matrix(bundle)
 
     assert first[0].evaluator_hash
     assert first[0].evaluator_hash != second[0].evaluator_hash
     assert first[0].id != second[0].id
+
+
+def test_each_task_uses_its_actual_evaluator_identity(
+    bundle: ExperimentBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = bundle.tasks[0].model_copy(
+        update={"id": "other", "test_command": ("different-evaluator",)}
+    )
+    bundle = bundle.model_copy(update={"tasks": (*bundle.tasks, other)})
+    seen: list[tuple[str, ...]] = []
+
+    def identity(command: tuple[str, ...]) -> dict[str, object]:
+        seen.append(command)
+        return {"command": command[0]}
+
+    monkeypatch.setattr("agentablate.matrix.evaluator_identity", identity)
+
+    trials = expand_matrix(bundle)
+
+    hashes = {trial.task.id: trial.evaluator_hash for trial in trials}
+    assert hashes["fix-bug"] != hashes["other"]
+    assert set(seen) == {bundle.tasks[0].test_command, other.test_command}
+
+
+def test_expand_matrix_refreshes_default_dependency_identity(
+    bundle: ExperimentBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Distribution:
+        metadata = {"Name": "changing-package"}
+
+        def __init__(self, version: str) -> None:
+            self.version = version
+
+    task = bundle.tasks[0].model_copy(update={"test_command": ("missing-checker",)})
+    bundle = bundle.model_copy(update={"tasks": (task,)})
+
+    monkeypatch.setattr(
+        "agentablate.identity.importlib.metadata.distributions",
+        lambda: [Distribution("1.0")],
+    )
+    before = expand_matrix(bundle)
+    monkeypatch.setattr(
+        "agentablate.identity.importlib.metadata.distributions",
+        lambda: [Distribution("2.0")],
+    )
+    after = expand_matrix(bundle)
+
+    assert before[0].evaluator_hash != after[0].evaluator_hash
+    assert before[0].id != after[0].id

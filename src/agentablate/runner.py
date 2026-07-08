@@ -23,6 +23,7 @@ from agentablate.evaluators import (
     evaluate,
 )
 from agentablate.models import TrialSpec
+from agentablate.redaction import Redactor
 from agentablate.storage import SQLiteStorage
 from agentablate.workspace import WorktreeWorkspace
 
@@ -33,6 +34,14 @@ Evaluator = Callable[..., Any]
 
 class AdapterConfigurationError(ValueError):
     """Raised when an adapter lacks required trial configuration."""
+
+
+class AdapterExecutionError(RuntimeError):
+    """Raised when an adapter process exits unsuccessfully."""
+
+    def __init__(self, result: AdapterResult) -> None:
+        super().__init__(f"agent command exited with code {result.exit_code}")
+        self.result = result
 
 
 class TrialLeaseLost(RuntimeError):
@@ -65,6 +74,7 @@ class TrialRunner:
         self.recover_running = recover_running
         self.lease_timeout_seconds = lease_timeout_seconds
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self._redactor = Redactor()
         self._recovery_attempted: set[str] = set()
         self.adapters = adapters if adapters is not None else {
             "fake": lambda trial: FakeAdapter(),
@@ -90,7 +100,7 @@ class TrialRunner:
         with path.open("a", encoding="utf-8") as stream:
             for event in events:
                 record = {
-                    "data": event.data,
+                    "data": self._redactor.data(event.data),
                     "kind": event.kind,
                     "timestamp": event.timestamp,
                     "trial_id": trial_id,
@@ -219,9 +229,17 @@ class TrialRunner:
                     success=success,
                     duration_seconds=time.monotonic() - started,
                     exit_code=exit_code,
-                    error=error_text,
-                    stdout="\n".join(part for part in stdout_parts if part),
-                    stderr="\n".join(part for part in stderr_parts if part),
+                    error=(
+                        self._redact_text(trial, error_text)
+                        if error_text is not None
+                        else None
+                    ),
+                    stdout=self._redactor.text(
+                        "\n".join(part for part in stdout_parts if part)
+                    ),
+                    stderr=self._redactor.text(
+                        "\n".join(part for part in stderr_parts if part)
+                    ),
                 )
                 if not finished:
                     ownership_error = RuntimeError(
@@ -296,6 +314,8 @@ class TrialRunner:
                 include_events=not incremental,
             )
             exit_codes.append(adapter_result.exit_code)
+            if adapter_result.exit_code != 0:
+                raise AdapterExecutionError(adapter_result)
             try:
                 evaluation: EvaluationResult = await self.evaluator(
                     trial.task, workspace.path, trial.timeout_seconds
@@ -373,7 +393,9 @@ class TrialRunner:
         )
 
     def _redact_error(self, trial: TrialSpec, error: BaseException) -> str:
-        text = f"{type(error).__name__}: {error}"
+        return self._redact_text(trial, f"{type(error).__name__}: {error}")
+
+    def _redact_text(self, trial: TrialSpec, text: str) -> str:
         replacements = sorted(
             ((str(self.root.resolve()), "<root>"), (str(trial.task.repo.resolve()), "<repo>")),
             key=lambda item: len(item[0]),
@@ -381,7 +403,7 @@ class TrialRunner:
         )
         for value, replacement in replacements:
             text = text.replace(value, replacement)
-        return text
+        return self._redactor.text(text)
 
     async def run_all(
         self, trials: Iterable[TrialSpec], concurrency: int

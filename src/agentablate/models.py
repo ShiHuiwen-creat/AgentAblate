@@ -39,7 +39,7 @@ class TaskSpec(FrozenModel):
     repo: Path
     revision: str = "HEAD"
     prompt: str
-    test_command: tuple[str, ...]
+    test_command: tuple[str, ...] = Field(min_length=1)
 
 
 class ExperimentConfig(FrozenModel):
