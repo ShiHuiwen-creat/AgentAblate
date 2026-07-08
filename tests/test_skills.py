@@ -26,6 +26,7 @@ def test_skill_identity_has_safe_content_addressed_install_name(
     assert tree.source == (tmp_path / "skill").resolve()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX executable bits required")
 def test_skill_fingerprint_binds_content_and_mode(tmp_path: Path) -> None:
     skill = write_skill(tmp_path / "skill", "reviewer")
     first = inspect_skill(skill)

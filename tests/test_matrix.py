@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -98,6 +99,7 @@ def test_directory_fingerprint_preserves_file_boundaries(tmp_path: Path) -> None
     assert fingerprint_path(first) != fingerprint_path(second)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX executable bits required")
 def test_directory_fingerprint_binds_executable_mode(tmp_path: Path) -> None:
     directory = tmp_path / "extension"
     directory.mkdir()
