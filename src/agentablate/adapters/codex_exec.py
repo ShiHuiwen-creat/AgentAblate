@@ -22,9 +22,19 @@ CODEX_EXEC_POLICY = (
 _MACOS_CODEX_CANDIDATES = (
     Path("/Applications/Codex.app/Contents/Resources/codex"),
 )
+_CREDENTIAL_DIRECTORIES = frozenset({".ssh", ".aws", ".gnupg"})
 _CREDENTIAL_FILES = frozenset(
-    {"auth.json", "credentials.json", "credential.json"}
+    {
+        "auth.json",
+        "credential.json",
+        "credentials.json",
+        "secret.json",
+        "secrets.json",
+        "token.json",
+        "tokens.json",
+    }
 )
+_CREDENTIAL_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx"})
 _WINDOWS_ENVIRONMENT = (
     "SystemRoot",
     "ComSpec",
@@ -48,15 +58,28 @@ def _ambient_skill_paths() -> tuple[Path, ...]:
     return (home / ".agents" / "skills", home / ".codex" / "skills")
 
 
+def _is_credential_path(path: Path, root: Path) -> bool:
+    relative = path.relative_to(root)
+    parts = tuple(part.lower() for part in relative.parts)
+    name = parts[-1]
+    return (
+        bool(_CREDENTIAL_DIRECTORIES.intersection(parts))
+        or name == ".env"
+        or name.startswith(".env.")
+        or name in _CREDENTIAL_FILES
+        or path.suffix.lower() in _CREDENTIAL_SUFFIXES
+    )
+
+
 def _ambient_skills_hash() -> str:
     records: list[dict[str, object]] = []
 
     def visit(root_index: int, root: Path, directory: Path) -> None:
         with os.scandir(directory) as entries:
             for entry in sorted(entries, key=lambda item: item.name):
-                if entry.name.lower() in _CREDENTIAL_FILES:
-                    continue
                 path = Path(entry.path)
+                if _is_credential_path(path, root):
+                    continue
                 metadata = entry.stat(follow_symlinks=False)
                 if stat.S_ISLNK(metadata.st_mode):
                     raise ValueError(f"ambient skill tree must not contain a symlink: {path}")

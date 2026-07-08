@@ -65,7 +65,7 @@ def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
                 extension_hashes = (*skill_hashes, *mcp_hashes)
                 runtime = runtimes.get(agent.id)
                 for repetition in range(meta.repetitions):
-                    payload = {
+                    payload: dict[str, object] = {
                         "config_hash": bundle.config_hash,
                         "experiment": meta.name,
                         "agent": agent.model_dump(mode="json"),
@@ -82,14 +82,13 @@ def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
                         },
                         "repetition": repetition,
                         "evaluator_hash": evaluator_hash,
-                        "adapter_runtime": (
-                            runtime.model_dump(mode="json") if runtime else None
-                        ),
-                        "skill_inputs": [
+                    }
+                    if runtime is not None:
+                        payload["adapter_runtime"] = runtime.model_dump(mode="json")
+                        payload["skill_inputs"] = [
                             identity.model_dump(mode="json")
                             for identity in skill_inputs
-                        ],
-                    }
+                        ]
                     trials.append(
                         TrialSpec(
                             id=_trial_id(payload),

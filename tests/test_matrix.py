@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agentablate.adapters.codex_exec import CODEX_EXEC_POLICY
-from agentablate.matrix import expand_matrix, fingerprint_path
+from agentablate.matrix import _trial_id, expand_matrix, fingerprint_path
 from agentablate.models import (
     AdapterRuntimeIdentity,
     AgentConfig,
@@ -281,3 +281,39 @@ def test_matrix_freezes_structured_skill_inputs_once_per_variant(
     with_skill = next(trial for trial in trials if trial.variant.id == "with-skill")
     assert tuple(identity.name for identity in with_skill.skill_inputs) == ("reviewer",)
     assert all(trial.adapter_runtime is None for trial in trials)
+
+
+@pytest.mark.parametrize("variant_index", (0, 1))
+def test_non_codex_trial_id_matches_phase_one_payload(
+    bundle: ExperimentBundle, variant_index: int
+) -> None:
+    trial = next(
+        trial
+        for trial in expand_matrix(bundle)
+        if trial.variant.id == bundle.config.variants[variant_index].id
+        and trial.repetition == 0
+    )
+    skill_hashes = tuple(
+        fingerprint_path(path) for path in trial.variant.skills
+    )
+    mcp_hashes = tuple(fingerprint_path(path) for path in trial.variant.mcp)
+    phase_one_payload = {
+        "config_hash": bundle.config_hash,
+        "experiment": bundle.config.experiment.name,
+        "agent": trial.agent.model_dump(mode="json"),
+        "variant": {
+            "id": trial.variant.id,
+            "skill_hashes": skill_hashes,
+            "mcp_hashes": mcp_hashes,
+        },
+        "task": {
+            "id": trial.task.id,
+            "revision": trial.task.revision,
+            "prompt": trial.task.prompt,
+            "test_command": trial.task.test_command,
+        },
+        "repetition": trial.repetition,
+        "evaluator_hash": trial.evaluator_hash,
+    }
+
+    assert trial.id == _trial_id(phase_one_payload)

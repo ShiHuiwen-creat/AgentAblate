@@ -10,6 +10,7 @@ from agentablate.adapters.codex_exec import (
     discover_codex_runtime,
     verify_codex_runtime,
 )
+from agentablate.processes import minimal_environment
 
 
 def _version(stdout: str = " codex-cli\t0.142.3 \n") -> SimpleNamespace:
@@ -143,6 +144,62 @@ def test_ambient_fingerprint_skips_credentials(
     assert discover_codex_runtime().ambient_skills_sha256 == first.ambient_skills_sha256
 
 
+def test_ambient_fingerprint_never_reads_credential_shaped_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"codex")
+    skills = tmp_path / "skills"
+    sensitive = (
+        ".env",
+        ".env.local",
+        "token.json",
+        "tokens.json",
+        "secret.json",
+        "secrets.json",
+        "auth.json",
+        "credential.json",
+        "credentials.json",
+        "client.pem",
+        "private.key",
+        "identity.p12",
+        "archive.pfx",
+        ".ssh/id_rsa",
+        ".aws/credentials",
+        ".gnupg/private-keys-v1.d/key",
+    )
+    for relative in sensitive:
+        path = skills / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"do-not-read:{relative}".encode())
+    safe = skills / "reviewer" / "SKILL.md"
+    safe.parent.mkdir()
+    safe.write_text("safe instructions")
+    original_read_bytes = Path.read_bytes
+    reads: list[Path] = []
+
+    def read_bytes(path: Path) -> bytes:
+        reads.append(path)
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr("agentablate.adapters.codex_exec.shutil.which", lambda _: str(executable))
+    monkeypatch.setattr("agentablate.adapters.codex_exec.platform.system", lambda: "Linux")
+    monkeypatch.setattr("agentablate.adapters.codex_exec._ambient_skill_paths", lambda: (skills,))
+    monkeypatch.setattr(
+        "agentablate.adapters.codex_exec.subprocess.run", lambda *a, **k: _version()
+    )
+
+    discover_codex_runtime()
+
+    relative_reads = {
+        path.relative_to(skills).as_posix()
+        for path in reads
+        if path.is_relative_to(skills)
+    }
+    assert relative_reads == {"reviewer/SKILL.md"}
+
+
 def test_windows_allowed_environment_is_exact_and_credential_free(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -153,6 +210,32 @@ def test_windows_allowed_environment_is_exact_and_credential_free(
     assert not any(
         fragment in name.upper() for name in allowed for fragment in ("TOKEN", "KEY", "SECRET")
     )
+
+
+def test_windows_allowed_environment_integrates_with_minimal_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("agentablate.adapters.codex_exec.platform.system", lambda: "Windows")
+    names = (
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "SystemRoot",
+        "ComSpec",
+        "USERPROFILE",
+        "LOCALAPPDATA",
+        "TEMP",
+        "TMP",
+        "CODEX_TOKEN",
+        "API_KEY",
+        "CLIENT_SECRET",
+    )
+    monkeypatch.setattr("agentablate.processes.os.environ", {name: name for name in names})
+
+    environment = minimal_environment(codex_allowed_environment())
+
+    assert tuple(environment) == names[:9]
+    assert not {"CODEX_TOKEN", "API_KEY", "CLIENT_SECRET"} & environment.keys()
 
 
 def test_posix_allowed_environment_adds_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
