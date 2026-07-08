@@ -38,12 +38,15 @@ agents:
 
 No credential is stored in experiment YAML. The adapter reuses the Codex CLI's
 existing authentication. `doctor` reports the selected executable and version,
-and explains how to authenticate when Codex is present but unusable.
+then runs the non-billed `codex login status` command. A non-zero status marks the
+adapter unavailable and gives the generic `codex login` instruction without
+persisting command output that could contain account details.
 
 Executable discovery checks `codex` on `PATH` first, followed by documented or
 well-known application-bundle locations supported by tests. This includes the
-Codex Desktop macOS bundle. Discovery failure is explicit and does not fall back
-to the generic command adapter.
+Codex Desktop macOS bundle. Windows is supported through `PATH`; no undocumented
+Windows application path is guessed. Discovery failure is explicit and does not
+fall back to the generic command adapter.
 
 ## Execution contract
 
@@ -56,9 +59,12 @@ codex exec --json --color never --sandbox workspace-write --ephemeral
 ```
 
 The adapter never enables `danger-full-access` or bypasses approvals. It inherits
-only AgentAblate's minimal environment (`PATH`, `HOME`, and `TMPDIR`), which allows
-the selected Codex installation and its existing authentication to work without
-copying credentials into evidence. Secrets are not added to the allowlist.
+only AgentAblate's platform-minimal environment. POSIX uses `PATH`, `HOME`, and
+`TMPDIR`; Windows additionally uses the operating-system variables required to
+launch and authenticate the CLI (`SystemRoot`, `ComSpec`, `USERPROFILE`,
+`LOCALAPPDATA`, `TEMP`, and `TMP`). Arbitrary variables and credential-shaped
+variables are not inherited. This allows the selected Codex installation and its
+existing authentication to work without copying credentials into evidence.
 
 `--ignore-user-config` does not guarantee that Codex ignores user-level skills.
 Therefore Phase 2 treats ambient user skills as part of the measured runtime rather
@@ -94,26 +100,38 @@ directory into the disposable worktree at:
 .agents/skills/<normalized-name>-<fingerprint-prefix>/
 ```
 
+Matrix expansion freezes an ordered structured identity for every skill containing
+its validated name, full fingerprint, and install name. Installation pairs each
+variant path with that structure by index and rejects any length or identity
+mismatch; it does not infer skill hashes from the flattened extension-hash tuple.
+
 This is Codex's repository-scoped skill discovery location. Installation happens
 after the detached trial worktree is created and before Codex starts. The adapter
 prompt explicitly invokes each validated frontmatter name using `$name` syntax so
 the intended intervention is not left solely to implicit matching.
 
-Skill trees may contain only directories and regular files. Symlinks, sockets,
-devices, FIFOs, and other special files are rejected before fingerprinting or
-copying. Fingerprints bind relative paths, file bytes, and executable permission
-bits. Copying never follows links and revalidates the tree immediately before use,
-preventing an input from escaping its declared directory or changing semantics
-between identity generation and installation.
+Skill trees, including the root itself, may contain only directories and regular
+files. Symlinks, sockets, devices, FIFOs, and other special files are rejected
+before resolving, fingerprinting, or copying. Fingerprints bind relative paths,
+file bytes, and executable permission bits. Installation rejects symlinks or
+special files in every existing destination ancestor, copies without following
+links, and then strictly fingerprints the installed snapshot against the frozen
+structured skill identity before Codex can start. A mismatch is cleaned up and
+fails the trial. This prevents path escape and detects an input that changes during
+inspection or copying.
 
 Before evaluation, AgentAblate removes only the injected paths and restores any
-pre-existing paths byte-for-byte. Thus skill files cannot satisfy the task's test
-command or appear as agent-generated changes. Installation and restoration are
-per-worktree, so concurrent trials never write to shared `~/.codex` or to the
-fixture repository.
+pre-existing paths byte-for-byte. Backups live in a unique system temporary
+directory outside the untrusted trial worktree. Thus skill files cannot satisfy the
+task's test command or appear as agent-generated changes. Installation and
+restoration are per-worktree, so concurrent trials never write to shared
+`~/.codex` or to the fixture repository. If execution and restoration both fail,
+both errors are retained in a grouped exception, including cancellation paths.
 
 Any installation or restoration failure fails the trial and is recorded. Cleanup
-is attempted on success, failure, timeout, and cancellation.
+is attempted on success, failure, timeout, and cancellation. Installation itself
+is transactional: if backup, copy, or installed-snapshot verification fails at any
+point, all completed steps are rolled back before the error escapes.
 
 ## Reproducibility identity
 
@@ -134,6 +152,12 @@ searching `PATH` again, and rechecks the executable hash and ambient-skill
 fingerprint immediately before launch. A mismatch fails the trial before Codex
 starts, closing the discovery-to-execution race. Existing variant skill
 fingerprints remain part of trial identity.
+
+The complete adapter runtime identity is also serialized as canonical JSON in the
+SQLite trial row, with a backward-compatible schema migration and an empty object
+for non-Codex or legacy rows. This keeps executable version, policy, and ambient
+skill evidence auditable after process restart instead of retaining only its effect
+on the trial hash.
 
 ## Integration points
 
