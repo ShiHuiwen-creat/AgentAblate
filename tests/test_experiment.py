@@ -5,14 +5,22 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agentablate.adapters.codex_exec import CodexExecAdapter
 from agentablate.experiment import (
     ApplicationError,
+    _adapter,
     doctor_experiment,
     initialize_experiment,
     run_experiment,
     starter_documents,
 )
-from agentablate.models import AgentConfig, ExperimentBundle, ExperimentConfig, ExperimentMeta
+from agentablate.models import (
+    AdapterRuntimeIdentity,
+    AgentConfig,
+    ExperimentBundle,
+    ExperimentConfig,
+    ExperimentMeta,
+)
 
 
 def _bundle(tmp_path: Path) -> ExperimentBundle:
@@ -46,6 +54,28 @@ def test_doctor_calls_adapter_doctor(tmp_path: Path) -> None:
 
     assert calls == ["doctor"]
     assert [(result.agent_id, result.available) for result in results] == [("fake", True)]
+
+
+def test_doctor_registry_selects_native_codex_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"codex")
+    runtime = AdapterRuntimeIdentity(
+        schema_version=1,
+        executable=executable,
+        executable_basename="codex",
+        executable_sha256="a" * 64,
+        version="v",
+        policy=(),
+        ambient_skills_sha256="b" * 64,
+    )
+    monkeypatch.setattr("agentablate.experiment.discover_codex_runtime", lambda: runtime)
+
+    selected = _adapter(AgentConfig(id="codex", adapter="codex-exec"))
+
+    assert isinstance(selected, CodexExecAdapter)
+    assert selected.runtime is runtime
 
 
 def test_run_forwards_concurrency_and_resume_to_runner(tmp_path: Path) -> None:

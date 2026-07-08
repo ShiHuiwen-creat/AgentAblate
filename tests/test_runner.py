@@ -8,10 +8,17 @@ from pathlib import Path
 import pytest
 
 from agentablate.adapters.base import AdapterResult, AdapterTimeout, AgentEvent
+from agentablate.adapters.codex_exec import CodexExecAdapter
 from agentablate.adapters.command import CommandAdapter
 from agentablate.evaluators import EvaluationResult
-from agentablate.models import AgentConfig, TaskSpec, TrialSpec, VariantConfig
-from agentablate.runner import TrialRunner
+from agentablate.models import (
+    AdapterRuntimeIdentity,
+    AgentConfig,
+    TaskSpec,
+    TrialSpec,
+    VariantConfig,
+)
+from agentablate.runner import AdapterConfigurationError, TrialRunner
 from agentablate.storage import SQLiteStorage
 
 
@@ -46,6 +53,27 @@ class RecordingWorkspace:
 
     async def __aexit__(self, *args: object) -> None:
         self.calls.append("cleanup")
+
+
+def test_runner_registry_selects_native_runtime_and_rejects_missing_runtime(tmp_path: Path) -> None:
+    runner = TrialRunner(tmp_path, SQLiteStorage(tmp_path / "runs.sqlite3"))
+    trial = _trial(tmp_path, adapter="codex-exec")
+    with pytest.raises(AdapterConfigurationError, match="adapter_runtime"):
+        runner._adapter_for(trial)
+    runtime = AdapterRuntimeIdentity(
+        schema_version=1,
+        executable=tmp_path / "codex",
+        executable_basename="codex",
+        executable_sha256="a" * 64,
+        version="v",
+        policy=(),
+        ambient_skills_sha256="b" * 64,
+    )
+
+    selected = runner._adapter_for(trial.model_copy(update={"adapter_runtime": runtime}))
+
+    assert isinstance(selected, CodexExecAdapter)
+    assert selected.runtime is runtime
 
 
 class RecordingAdapter:
@@ -110,9 +138,7 @@ async def test_adapter_failure_is_stored_with_partial_result_and_batch_continues
 
     def adapter_factory(trial: TrialSpec) -> RecordingAdapter:
         result: AdapterResult | BaseException = (
-            AdapterTimeout(partial)
-            if trial.id == "failed"
-            else AdapterResult(0, (), "ok", "")
+            AdapterTimeout(partial) if trial.id == "failed" else AdapterResult(0, (), "ok", "")
         )
         return RecordingAdapter(calls, result)
 
@@ -235,8 +261,7 @@ async def test_command_cancellation_persists_partial_streams_and_events(
             await asyncio.sleep(0.01)
 
     in_progress = [
-        json.loads(line)
-        for line in runner.events_path(trial.id).read_text().splitlines()
+        json.loads(line) for line in runner.events_path(trial.id).read_text().splitlines()
     ]
     assert [event["kind"] for event in in_progress] == ["start"]
 
@@ -300,9 +325,7 @@ async def test_evaluator_cancellation_persists_partial_streams(tmp_path: Path) -
         f"pathlib.Path({str(marker)!r}).write_text('ready'); "
         "time.sleep(10)"
     )
-    task = _trial(tmp_path).task.model_copy(
-        update={"test_command": (sys.executable, "-c", script)}
-    )
+    task = _trial(tmp_path).task.model_copy(update={"test_command": (sys.executable, "-c", script)})
     trial = _trial(tmp_path).model_copy(update={"task": task})
     calls: list[str] = []
     runner = TrialRunner(
@@ -373,9 +396,7 @@ async def test_run_all_contains_storage_failure_to_one_trial(tmp_path: Path) -> 
     runner = TrialRunner(
         tmp_path,
         FailingStorage(tmp_path / "runs.sqlite3"),
-        adapters={
-            "fake": lambda trial: RecordingAdapter(calls, AdapterResult(0, (), "", ""))
-        },
+        adapters={"fake": lambda trial: RecordingAdapter(calls, AdapterResult(0, (), "", ""))},
         workspace_factory=lambda repo, revision, path: RecordingWorkspace(
             repo, revision, path, calls
         ),
@@ -429,9 +450,7 @@ async def test_finish_failure_does_not_mask_cancellation(tmp_path: Path) -> None
         tmp_path,
         storage,
         adapters={"fake": lambda trial: BlockingAdapter()},
-        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
-            repo, revision, path, []
-        ),
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
     )
     running = asyncio.create_task(runner.run_trial(_trial(tmp_path)))
     await asyncio.sleep(0)
@@ -489,12 +508,8 @@ async def test_runner_redacts_allowed_environment_secret_from_all_evidence(
                 trial.agent.command or (), allowed_env=("SERVICE_TOKEN",)
             )
         },
-        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
-            repo, revision, path, []
-        ),
-        evaluator=lambda *args: asyncio.sleep(
-            0, result=EvaluationResult(True, 0, "", "", ())
-        ),
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
+        evaluator=lambda *args: asyncio.sleep(0, result=EvaluationResult(True, 0, "", "", ())),
     )
     monkeypatch.setenv("SERVICE_TOKEN", secret)
 
@@ -529,12 +544,8 @@ async def test_runner_recursively_redacts_secret_event_keys_and_preserves_plain_
                 [], AdapterResult(0, (event,), "ordinary text", "")
             )
         },
-        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
-            repo, revision, path, []
-        ),
-        evaluator=lambda *args: asyncio.sleep(
-            0, result=EvaluationResult(True, 0, "", "", ())
-        ),
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
+        evaluator=lambda *args: asyncio.sleep(0, result=EvaluationResult(True, 0, "", "", ())),
     )
 
     row = await runner.run_trial(_trial(tmp_path))
@@ -564,9 +575,7 @@ async def test_nonzero_adapter_result_fails_without_running_evaluator(
         tmp_path,
         SQLiteStorage(tmp_path / "runs.sqlite3"),
         adapters={"fake": lambda trial: RecordingAdapter([], adapter_result)},
-        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
-            repo, revision, path, []
-        ),
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
         evaluator=evaluator,
     )
 
@@ -597,12 +606,8 @@ async def test_nonzero_command_adapter_cannot_be_washed_clean_by_evaluator(
     runner = TrialRunner(
         tmp_path,
         SQLiteStorage(tmp_path / "runs.sqlite3"),
-        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
-            repo, revision, path, []
-        ),
-        evaluator=lambda *args: asyncio.sleep(
-            0, result=EvaluationResult(True, 0, "", "", ())
-        ),
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
+        evaluator=lambda *args: asyncio.sleep(0, result=EvaluationResult(True, 0, "", "", ())),
     )
 
     row = await runner.run_trial(trial)
@@ -620,9 +625,7 @@ async def test_empty_adapter_mapping_does_not_enable_defaults(tmp_path: Path) ->
         tmp_path,
         SQLiteStorage(tmp_path / "runs.sqlite3"),
         adapters={},
-        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
-            repo, revision, path, []
-        ),
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
     )
 
     row = await runner.run_trial(trial)
@@ -652,9 +655,7 @@ async def test_two_runners_recover_stale_attempt_only_once(tmp_path: Path) -> No
             nonlocal executions
             executions += 1
             await asyncio.sleep(0.05)
-            return AdapterResult(
-                0, (AgentEvent("new", 1.0, {}),), "", ""
-            )
+            return AdapterResult(0, (AgentEvent("new", 1.0, {}),), "", "")
 
     async def evaluator(task: TaskSpec, path: Path, timeout: float) -> EvaluationResult:
         return EvaluationResult(True, 0, "", "", ())
@@ -673,9 +674,7 @@ async def test_two_runners_recover_stale_attempt_only_once(tmp_path: Path) -> No
             heartbeat_interval_seconds=0.01,
         )
 
-    rows = await asyncio.gather(
-        make_runner().run_trial(trial), make_runner().run_trial(trial)
-    )
+    rows = await asyncio.gather(make_runner().run_trial(trial), make_runner().run_trial(trial))
 
     events = [json.loads(line) for line in old_events.read_text().splitlines()]
     assert executions == 1
@@ -699,9 +698,7 @@ async def test_runner_heartbeats_active_attempt(tmp_path: Path) -> None:
         tmp_path,
         storage,
         adapters={"fake": lambda trial: BlockingAdapter()},
-        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
-            repo, revision, path, []
-        ),
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
         heartbeat_interval_seconds=0.01,
     )
     running = asyncio.create_task(runner.run_trial(trial))
@@ -719,8 +716,7 @@ async def test_runner_heartbeats_active_attempt(tmp_path: Path) -> None:
 async def test_lost_lease_terminates_command_and_fails_trial(tmp_path: Path) -> None:
     leaked = tmp_path / "lease-lost-leaked"
     script = (
-        "import pathlib, time; time.sleep(0.5); "
-        f"pathlib.Path({str(leaked)!r}).write_text('leaked')"
+        f"import pathlib, time; time.sleep(0.5); pathlib.Path({str(leaked)!r}).write_text('leaked')"
     )
     base = _trial(tmp_path, adapter="command")
     trial = base.model_copy(
@@ -834,9 +830,7 @@ async def test_command_adapter_requires_command_configuration(tmp_path: Path) ->
     runner = TrialRunner(
         tmp_path,
         SQLiteStorage(tmp_path / "runs.sqlite3"),
-        workspace_factory=lambda repo, revision, path: RecordingWorkspace(
-            repo, revision, path, []
-        ),
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
     )
 
     row = await runner.run_trial(trial)

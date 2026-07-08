@@ -1,20 +1,229 @@
+import hashlib
+import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from agentablate.adapters.base import AdapterCancelled, AdapterResult, AdapterTimeout
 from agentablate.adapters.codex_exec import (
     CODEX_EXEC_POLICY,
+    CodexExecAdapter,
     CodexRuntimeChanged,
     codex_allowed_environment,
     discover_codex_runtime,
     verify_codex_runtime,
+)
+from agentablate.models import (
+    AdapterRuntimeIdentity,
+    AgentConfig,
+    TaskSpec,
+    TrialSpec,
+    VariantConfig,
 )
 from agentablate.processes import minimal_environment
 
 
 def _version(stdout: str = " codex-cli\t0.142.3 \n") -> SimpleNamespace:
     return SimpleNamespace(stdout=stdout)
+
+
+def _runtime(executable: Path, *, ambient: str | None = None) -> AdapterRuntimeIdentity:
+    return AdapterRuntimeIdentity(
+        schema_version=1,
+        executable=executable,
+        executable_basename=executable.name,
+        executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+        version="codex-cli 0.test",
+        policy=CODEX_EXEC_POLICY,
+        ambient_skills_sha256=ambient or hashlib.sha256(b"[]").hexdigest(),
+    )
+
+
+def _trial(tmp_path: Path, prompt: str, timeout: int = 2) -> TrialSpec:
+    return TrialSpec(
+        id="native",
+        experiment="demo",
+        agent=AgentConfig(id="codex", adapter="codex-exec"),
+        variant=VariantConfig(id="baseline"),
+        task=TaskSpec(id="task", repo=tmp_path, prompt=prompt, test_command=("true",)),
+        repetition=0,
+        timeout_seconds=timeout,
+        config_hash="hash",
+        extension_hashes=(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_adapter_uses_literal_prompt_policy_worktree_and_preserves_jsonl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "fake codex"
+    executable.write_text(
+        f"#!{Path(sys.executable).resolve()}\n"
+        "import json,sys\n"
+        "print(json.dumps({'argv':sys.argv[1:]}))\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setattr("agentablate.adapters.codex_exec._ambient_skill_paths", lambda: ())
+    marker = tmp_path / "injected"
+    prompt = f"literal ; touch {marker} $(echo nope)"
+    trial = _trial(tmp_path, prompt)
+    adapter = CodexExecAdapter(_runtime(executable))
+
+    assert adapter.command_for(trial, tmp_path) == (
+        str(executable),
+        "exec",
+        *CODEX_EXEC_POLICY,
+        "-C",
+        str(tmp_path),
+        prompt,
+    )
+    result = await adapter.run(trial, tmp_path)
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["argv"] == list(adapter.command_for(trial, tmp_path)[1:])
+    assert not marker.exists()
+    assert [event.kind for event in result.events] == ["start", "completed"]
+
+
+@pytest.mark.asyncio
+async def test_native_adapter_preserves_nonzero_exit_and_partial_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_text(
+        f"#!{Path(sys.executable).resolve()}\n"
+        "import sys\nprint('{\"partial\":true}')\nsys.exit(7)\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setattr("agentablate.adapters.codex_exec._ambient_skill_paths", lambda: ())
+
+    result = await CodexExecAdapter(_runtime(executable)).run(_trial(tmp_path, "go"), tmp_path)
+
+    assert (result.exit_code, result.stdout.strip()) == (7, '{"partial":true}')
+
+
+@pytest.mark.asyncio
+async def test_doctor_login_status_is_shell_free_minimal_and_redacted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"fake")
+    observed: dict[str, object] = {}
+
+    class Process:
+        returncode = 1
+
+    async def create(command, *, cwd=None, env=None):
+        observed.update(command=command, cwd=cwd, env=env)
+        return Process()
+
+    async def communicate(process, timeout):
+        return b"account: private@example.test", b"secret-token"
+
+    monkeypatch.setattr("agentablate.adapters.codex_exec.create_process", create)
+    monkeypatch.setattr("agentablate.adapters.codex_exec.communicate", communicate)
+    monkeypatch.setattr(
+        "agentablate.adapters.codex_exec.minimal_environment",
+        lambda allowed: {"SAFE": "1"},
+    )
+
+    available, detail = await CodexExecAdapter(_runtime(executable)).doctor()
+
+    assert observed == {
+        "command": (str(executable), "login", "status"),
+        "cwd": None,
+        "env": {"SAFE": "1"},
+    }
+    assert not available
+    assert detail == "Codex authentication unavailable. Run codex login to authenticate."
+    assert "private" not in detail and "secret" not in detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [TimeoutError(), OSError("account detail")])
+async def test_doctor_failure_is_generic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"fake")
+
+    async def create(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr("agentablate.adapters.codex_exec.create_process", create)
+    assert await CodexExecAdapter(_runtime(executable)).doctor() == (
+        False,
+        "Codex authentication unavailable. Run codex login to authenticate.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_doctor_success_reports_runtime_and_ambient_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"fake")
+
+    class Process:
+        returncode = 0
+
+    async def create(*args, **kwargs):
+        return Process()
+
+    async def communicate(*args):
+        return b"account detail", b"secret"
+
+    monkeypatch.setattr("agentablate.adapters.codex_exec.create_process", create)
+    monkeypatch.setattr("agentablate.adapters.codex_exec.communicate", communicate)
+    runtime = _runtime(executable, ambient="f" * 64)
+
+    available, detail = await CodexExecAdapter(runtime).doctor()
+
+    assert available
+    assert detail == "codex codex-cli 0.test is available; warning: ambient skills are present"
+    assert "account detail" not in detail and "secret" not in detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exception_type", [AdapterTimeout, AdapterCancelled])
+async def test_native_adapter_preserves_command_process_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exception_type: type[BaseException],
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"fake")
+    monkeypatch.setattr("agentablate.adapters.codex_exec.verify_codex_runtime", lambda _: None)
+    partial = AdapterResult(-1, (), "partial", "diagnostic")
+    terminal = exception_type(partial)
+    observed: dict[str, object] = {}
+
+    class FakeCommandAdapter:
+        def __init__(self, command, *, allowed_env):
+            observed.update(command=command, allowed_env=allowed_env)
+
+        async def run(self, trial, cwd, *, on_event=None):
+            observed.update(trial=trial, cwd=cwd, on_event=on_event)
+            raise terminal
+
+    monkeypatch.setattr("agentablate.adapters.codex_exec.CommandAdapter", FakeCommandAdapter)
+    trial = _trial(tmp_path, "go")
+
+    def sink(event):
+        return None
+
+    with pytest.raises(exception_type) as raised:
+        await CodexExecAdapter(_runtime(executable)).run(trial, tmp_path, on_event=sink)
+
+    assert raised.value is terminal
+    assert observed["command"][-1] == "go"
+    assert observed["trial"] is trial and observed["on_event"] is sink
 
 
 def test_discovery_prefers_path_and_normalizes_version(
@@ -193,9 +402,7 @@ def test_ambient_fingerprint_never_reads_credential_shaped_paths(
     discover_codex_runtime()
 
     relative_reads = {
-        path.relative_to(skills).as_posix()
-        for path in reads
-        if path.is_relative_to(skills)
+        path.relative_to(skills).as_posix() for path in reads if path.is_relative_to(skills)
     }
     assert relative_reads == {"reviewer/SKILL.md"}
 

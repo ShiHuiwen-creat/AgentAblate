@@ -5,9 +5,20 @@ import platform
 import shutil
 import stat
 import subprocess
+from contextlib import suppress
 from pathlib import Path
 
-from agentablate.models import AdapterRuntimeIdentity
+from agentablate.adapters.base import AdapterResult, EventSink
+from agentablate.adapters.command import CommandAdapter
+from agentablate.models import AdapterRuntimeIdentity, TrialSpec
+from agentablate.processes import (
+    ProcessCancelled,
+    ProcessTimeout,
+    communicate,
+    create_process,
+    minimal_environment,
+    terminate_process,
+)
 
 CODEX_EXEC_POLICY = (
     "--json",
@@ -19,9 +30,7 @@ CODEX_EXEC_POLICY = (
     "--ignore-user-config",
 )
 
-_MACOS_CODEX_CANDIDATES = (
-    Path("/Applications/Codex.app/Contents/Resources/codex"),
-)
+_MACOS_CODEX_CANDIDATES = (Path("/Applications/Codex.app/Contents/Resources/codex"),)
 _CREDENTIAL_DIRECTORIES = frozenset({".ssh", ".aws", ".gnupg"})
 _CREDENTIAL_FILES = frozenset(
     {
@@ -47,6 +56,59 @@ _WINDOWS_ENVIRONMENT = (
 
 class CodexRuntimeChanged(RuntimeError):
     """The frozen Codex runtime no longer matches the local runtime."""
+
+
+_LOGIN_FAILURE = "Codex authentication unavailable. Run codex login to authenticate."
+_EMPTY_AMBIENT_HASH = hashlib.sha256(b"[]").hexdigest()
+
+
+class CodexExecAdapter:
+    def __init__(self, runtime: AdapterRuntimeIdentity) -> None:
+        self.runtime = runtime
+
+    async def doctor(self) -> tuple[bool, str]:
+        if not await _login_status(self.runtime.executable):
+            return False, _LOGIN_FAILURE
+        message = f"{self.runtime.executable_basename} {self.runtime.version} is available"
+        if self.runtime.ambient_skills_sha256 != _EMPTY_AMBIENT_HASH:
+            message += "; warning: ambient skills are present"
+        return True, message
+
+    def command_for(self, trial: TrialSpec, cwd: Path) -> tuple[str, ...]:
+        return (
+            str(self.runtime.executable),
+            "exec",
+            *CODEX_EXEC_POLICY,
+            "-C",
+            str(cwd),
+            trial.task.prompt,
+        )
+
+    async def run(
+        self, trial: TrialSpec, cwd: Path, *, on_event: EventSink | None = None
+    ) -> AdapterResult:
+        verify_codex_runtime(self.runtime)
+        return await CommandAdapter(
+            self.command_for(trial, cwd),
+            allowed_env=codex_allowed_environment(),
+        ).run(trial, cwd, on_event=on_event)
+
+
+async def _login_status(executable: Path) -> bool:
+    process = None
+    try:
+        process = await create_process(
+            (str(executable), "login", "status"),
+            cwd=None,
+            env=minimal_environment(codex_allowed_environment()),
+        )
+        await communicate(process, 10)
+        return process.returncode == 0
+    except (OSError, TimeoutError, ProcessTimeout, ProcessCancelled):
+        if process is not None:
+            with suppress(BaseException):
+                await terminate_process(process)
+        return False
 
 
 def codex_allowed_environment() -> tuple[str, ...]:
@@ -96,8 +158,7 @@ def _ambient_skills_hash() -> str:
                     )
                 else:
                     raise ValueError(
-                        "ambient skill tree entries must be a regular file or "
-                        f"directory: {path}"
+                        f"ambient skill tree entries must be a regular file or directory: {path}"
                     )
 
     for index, candidate in enumerate(_ambient_skill_paths()):
