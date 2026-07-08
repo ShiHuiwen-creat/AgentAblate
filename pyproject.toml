@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentablate"
+version = "0.1.0.dev0"
+description = "Reproducible ablation testing for coding-agent skills and MCP servers"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "ShiHuiwen-creat" }]
+dependencies = [
+  "jinja2>=3.1.6",
+  "pydantic>=2.11",
+  "pyyaml>=6.0.2",
+  "typer>=0.16",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4",
+  "pytest-asyncio>=1.0",
+  "pytest-cov>=6.2",
+  "ruff>=0.12",
+]
+
+[project.scripts]
+agentablate = "agentablate.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentablate"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
