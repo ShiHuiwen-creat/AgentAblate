@@ -84,7 +84,8 @@ class SQLiteStorage:
                     heartbeat_at TEXT,
                     adapter_type TEXT NOT NULL DEFAULT 'unknown (legacy)',
                     implementation_version TEXT NOT NULL DEFAULT 'unknown (legacy)',
-                    evaluator_hash TEXT NOT NULL DEFAULT ''
+                    evaluator_hash TEXT NOT NULL DEFAULT '',
+                    adapter_runtime_json TEXT NOT NULL DEFAULT '{}'
                     )"""
                 )
                 experiment_columns = {
@@ -113,6 +114,7 @@ class SQLiteStorage:
                     "adapter_type": "TEXT NOT NULL DEFAULT 'unknown (legacy)'",
                     "implementation_version": "TEXT NOT NULL DEFAULT 'unknown (legacy)'",
                     "evaluator_hash": "TEXT NOT NULL DEFAULT ''",
+                    "adapter_runtime_json": "TEXT NOT NULL DEFAULT '{}'",
                 }
                 for name, definition in additions.items():
                     if name not in columns:
@@ -181,6 +183,13 @@ class SQLiteStorage:
             trial.agent.adapter,
             __version__,
             trial.evaluator_hash,
+            json.dumps(
+                trial.adapter_runtime.model_dump(mode="json")
+                if trial.adapter_runtime
+                else {},
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
         )
         connection.execute(
             """
@@ -188,8 +197,8 @@ class SQLiteStorage:
                     id, experiment, agent_id, variant_id, task_id, repetition,
                     status, started_at, config_hash, extension_hashes, attempt_id,
                     heartbeat_at, adapter_type, implementation_version,
-                    evaluator_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    evaluator_hash, adapter_runtime_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     status='running', success=NULL, duration_seconds=NULL,
                     exit_code=NULL, error=NULL, started_at=excluded.started_at,
@@ -198,7 +207,8 @@ class SQLiteStorage:
                     heartbeat_at=excluded.heartbeat_at,
                     adapter_type=excluded.adapter_type,
                     implementation_version=excluded.implementation_version,
-                    evaluator_hash=excluded.evaluator_hash
+                    evaluator_hash=excluded.evaluator_hash,
+                    adapter_runtime_json=excluded.adapter_runtime_json
             """,
             values,
         )
@@ -293,4 +303,8 @@ class SQLiteStorage:
             row = connection.execute(
                 "SELECT * FROM trials WHERE id=?", (trial_id,)
             ).fetchone()
-        return dict(row) if row is not None else None
+        if row is None:
+            return None
+        result = dict(row)
+        result["adapter_runtime_json"] = json.loads(result["adapter_runtime_json"])
+        return result

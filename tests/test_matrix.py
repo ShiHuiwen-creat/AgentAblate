@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from agentablate.adapters.codex_exec import CODEX_EXEC_POLICY
 from agentablate.matrix import expand_matrix, fingerprint_path
 from agentablate.models import (
+    AdapterRuntimeIdentity,
     AgentConfig,
     ExperimentBundle,
     ExperimentConfig,
@@ -19,7 +21,7 @@ from agentablate.models import (
 def bundle(tmp_path: Path) -> ExperimentBundle:
     skill = tmp_path / "skill"
     skill.mkdir()
-    (skill / "SKILL.md").write_text("version one")
+    (skill / "SKILL.md").write_text("---\nname: reviewer\ndescription: Test\n---\nversion one\n")
     config = ExperimentConfig(
         version=1,
         experiment=ExperimentMeta(name="demo", repetitions=2),
@@ -76,7 +78,7 @@ def test_skill_content_changes_only_its_variant_ids(
 ) -> None:
     before = expand_matrix(bundle)
     skill_file = bundle.config.variants[1].skills[0] / "SKILL.md"
-    skill_file.write_text("version two")
+    skill_file.write_text("---\nname: reviewer\ndescription: Test\n---\nversion two\n")
 
     after = expand_matrix(bundle)
 
@@ -118,7 +120,9 @@ def test_trial_ids_are_stable_when_experiment_root_moves(
 ) -> None:
     copied_skill = tmp_path / "copied" / "skill"
     copied_skill.mkdir(parents=True)
-    (copied_skill / "SKILL.md").write_text("version one")
+    (copied_skill / "SKILL.md").write_text(
+        "---\nname: reviewer\ndescription: Test\n---\nversion one\n"
+    )
     copied_variants = (
         VariantConfig(id="baseline"),
         VariantConfig(id="with-skill", skills=(copied_skill,)),
@@ -130,9 +134,7 @@ def test_trial_ids_are_stable_when_experiment_root_moves(
         check=True,
     )
     copied_task = bundle.tasks[0].model_copy(update={"repo": copied_repo})
-    copied_bundle = bundle.model_copy(
-        update={"config": copied_config, "tasks": (copied_task,)}
-    )
+    copied_bundle = bundle.model_copy(update={"config": copied_config, "tasks": (copied_task,)})
 
     assert [trial.id for trial in expand_matrix(bundle)] == [
         trial.id for trial in expand_matrix(copied_bundle)
@@ -221,3 +223,61 @@ def test_expand_matrix_refreshes_default_dependency_identity(
 
     assert before[0].evaluator_hash != after[0].evaluator_hash
     assert before[0].id != after[0].id
+
+
+def _codex_bundle(bundle: ExperimentBundle) -> ExperimentBundle:
+    config = bundle.config.model_copy(
+        update={"agents": (AgentConfig(id="codex", adapter="codex-exec"),)}
+    )
+    return bundle.model_copy(update={"config": config})
+
+
+def test_codex_runtime_changes_trial_id(
+    bundle: ExperimentBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "agentablate.matrix.discover_codex_runtime",
+        lambda: AdapterRuntimeIdentity(
+            schema_version=1,
+            executable="/tools/codex",
+            executable_basename="codex",
+            executable_sha256="a" * 64,
+            version="codex-cli 1.0.0",
+            policy=CODEX_EXEC_POLICY,
+            ambient_skills_sha256="b" * 64,
+        ),
+    )
+    first = expand_matrix(_codex_bundle(bundle))[0]
+    monkeypatch.setattr(
+        "agentablate.matrix.discover_codex_runtime",
+        lambda: first.adapter_runtime.model_copy(update={"executable_sha256": "c" * 64}),
+    )
+    second = expand_matrix(_codex_bundle(bundle))[0]
+
+    assert first.id != second.id
+
+
+def test_matrix_freezes_structured_skill_inputs_once_per_variant(
+    bundle: ExperimentBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agentablate.matrix as matrix
+
+    real_inspect = matrix.inspect_skills
+    calls: list[tuple[Path, ...]] = []
+
+    def inspect(paths: tuple[Path, ...]):
+        calls.append(paths)
+        return real_inspect(paths)
+
+    skill = bundle.config.variants[1].skills[0]
+    skill.joinpath("SKILL.md").write_text(
+        "---\nname: reviewer\ndescription: Test\n---\nInstructions.\n"
+    )
+    monkeypatch.setattr(matrix, "inspect_skills", inspect)
+
+    trials = expand_matrix(bundle)
+
+    assert calls == [(), (skill,)]
+    with_skill = next(trial for trial in trials if trial.variant.id == "with-skill")
+    assert tuple(identity.name for identity in with_skill.skill_inputs) == ("reviewer",)
+    assert all(trial.adapter_runtime is None for trial in trials)

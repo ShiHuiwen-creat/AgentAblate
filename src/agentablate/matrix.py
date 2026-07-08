@@ -2,9 +2,10 @@ import hashlib
 import json
 from pathlib import Path
 
+from agentablate.adapters.codex_exec import discover_codex_runtime
 from agentablate.identity import evaluator_environment_hash, evaluator_identity
 from agentablate.models import ExperimentBundle, TrialSpec
-from agentablate.skills import fingerprint_tree
+from agentablate.skills import fingerprint_tree, inspect_skills
 from agentablate.workspace import resolve_revision
 
 
@@ -36,6 +37,21 @@ def _trial_id(payload: dict[str, object]) -> str:
 def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
     trials: list[TrialSpec] = []
     meta = bundle.config.experiment
+    runtimes = {
+        agent.id: discover_codex_runtime()
+        for agent in bundle.config.agents
+        if agent.adapter == "codex-exec"
+    }
+    variants = {}
+    for variant in bundle.config.variants:
+        skill_trees = inspect_skills(variant.skills)
+        skill_hashes = tuple(tree.identity.fingerprint for tree in skill_trees)
+        mcp_hashes = tuple(fingerprint_path(path) for path in variant.mcp)
+        variants[variant.id] = (
+            tuple(tree.identity for tree in skill_trees),
+            skill_hashes,
+            mcp_hashes,
+        )
     for task in bundle.tasks:
         evaluator_hash = evaluator_environment_hash(
             evaluator_identity(task.test_command)
@@ -45,11 +61,9 @@ def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
         )
         for agent in bundle.config.agents:
             for variant in bundle.config.variants:
-                skill_hashes = tuple(
-                    fingerprint_path(path) for path in variant.skills
-                )
-                mcp_hashes = tuple(fingerprint_path(path) for path in variant.mcp)
+                skill_inputs, skill_hashes, mcp_hashes = variants[variant.id]
                 extension_hashes = (*skill_hashes, *mcp_hashes)
+                runtime = runtimes.get(agent.id)
                 for repetition in range(meta.repetitions):
                     payload = {
                         "config_hash": bundle.config_hash,
@@ -68,6 +82,13 @@ def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
                         },
                         "repetition": repetition,
                         "evaluator_hash": evaluator_hash,
+                        "adapter_runtime": (
+                            runtime.model_dump(mode="json") if runtime else None
+                        ),
+                        "skill_inputs": [
+                            identity.model_dump(mode="json")
+                            for identity in skill_inputs
+                        ],
                     }
                     trials.append(
                         TrialSpec(
@@ -81,6 +102,8 @@ def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
                             config_hash=bundle.config_hash,
                             extension_hashes=extension_hashes,
                             evaluator_hash=evaluator_hash,
+                            adapter_runtime=runtime,
+                            skill_inputs=skill_inputs,
                         )
                     )
     return trials
