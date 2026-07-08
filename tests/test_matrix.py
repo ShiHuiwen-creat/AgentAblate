@@ -98,6 +98,18 @@ def test_directory_fingerprint_preserves_file_boundaries(tmp_path: Path) -> None
     assert fingerprint_path(first) != fingerprint_path(second)
 
 
+def test_directory_fingerprint_binds_executable_mode(tmp_path: Path) -> None:
+    directory = tmp_path / "extension"
+    directory.mkdir()
+    script = directory / "run.sh"
+    script.write_text("exit 0\n")
+    script.chmod(0o755)
+    executable = fingerprint_path(directory)
+    script.chmod(0o644)
+
+    assert fingerprint_path(directory) != executable
+
+
 def test_trial_ids_are_stable_when_experiment_root_moves(
     bundle: ExperimentBundle,
     tmp_path: Path,

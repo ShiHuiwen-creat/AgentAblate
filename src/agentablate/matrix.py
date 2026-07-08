@@ -4,6 +4,7 @@ from pathlib import Path
 
 from agentablate.identity import evaluator_environment_hash, evaluator_identity
 from agentablate.models import ExperimentBundle, TrialSpec
+from agentablate.skills import fingerprint_tree
 from agentablate.workspace import resolve_revision
 
 
@@ -15,17 +16,7 @@ def fingerprint_path(path: Path) -> str:
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
     elif path.is_dir():
-        children = sorted(item for item in path.rglob("*") if item.is_file())
-        payload = {
-            "kind": "directory",
-            "files": [
-                (
-                    child.relative_to(path).as_posix(),
-                    hashlib.sha256(child.read_bytes()).hexdigest(),
-                )
-                for child in children
-            ],
-        }
+        return fingerprint_tree(path)
     else:
         payload = {"kind": "missing", "name": path.name}
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

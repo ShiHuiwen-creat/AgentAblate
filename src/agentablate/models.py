@@ -8,6 +8,12 @@ class FrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
+class SkillInputIdentity(FrozenModel):
+    name: str
+    fingerprint: str
+    install_name: str
+
+
 class ExperimentMeta(FrozenModel):
     name: str
     repetitions: int = Field(default=1, ge=1)
