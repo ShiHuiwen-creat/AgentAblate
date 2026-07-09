@@ -238,3 +238,32 @@ def test_installed_skills_copy_failure_restores_preexisting_target(
     assert existing.read_text(encoding="utf-8") == "pre-existing\n"
     assert existing.stat().st_mode & 0o777 == 0o600
     assert not (target / "scripts").exists()
+
+
+def test_installed_skills_copy_failure_removes_partial_new_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skill = write_skill(tmp_path / "skill", "reviewer")
+    extra = skill / "scripts" / "run.sh"
+    extra.parent.mkdir()
+    extra.write_text("exit 0\n", encoding="utf-8")
+    tree = inspect_skill(skill)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / ".agents" / "skills" / tree.identity.install_name
+    original_copy2 = shutil.copy2
+
+    def copy2(src: Path | str, dst: Path | str, *, follow_symlinks: bool = True):
+        if Path(src).name == "run.sh":
+            raise OSError("copy interrupted")
+        return original_copy2(src, dst, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(shutil, "copy2", copy2)
+
+    with pytest.raises(OSError, match="copy interrupted"), installed_skills(
+        (skill,), (tree.identity,), workspace
+    ):
+        raise AssertionError("unreachable")
+
+    assert not target.exists()
+    assert not (workspace / ".agents").exists()

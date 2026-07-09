@@ -254,13 +254,13 @@ class TrialRunner:
         stderr_parts: list[str],
         exit_codes: list[int],
     ) -> tuple[bool, int]:
+        if trial.agent.adapter == "codex-exec" and trial.variant.mcp:
+            raise AdapterConfigurationError("codex-exec does not support MCP inputs")
         workspace_path = self.root / ".agentablate" / "worktrees" / trial.id
         async with self.workspace_factory(
             trial.task.repo, trial.task.revision, workspace_path
         ) as workspace:
             if trial.agent.adapter == "codex-exec":
-                if trial.variant.mcp:
-                    raise AdapterConfigurationError("codex-exec does not support MCP inputs")
                 with installed_skills(trial.variant.skills, trial.skill_inputs, workspace.path):
                     adapter_result, incremental = await self._run_adapter(
                         trial, workspace.path, stdout_parts, stderr_parts, exit_codes

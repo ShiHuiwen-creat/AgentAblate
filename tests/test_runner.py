@@ -147,23 +147,32 @@ async def test_codex_mcp_is_rejected_before_adapter_factory(tmp_path: Path) -> N
         update={"variant": VariantConfig(id="with-mcp", mcp=(tmp_path / "server.json",))}
     )
     adapter_called = False
+    workspace_called = False
 
     def adapter_factory(trial: TrialSpec) -> RecordingAdapter:
         nonlocal adapter_called
         adapter_called = True
         return RecordingAdapter([], AdapterResult(0, (), "", ""))
 
+    def workspace_factory(
+        repo: Path, revision: str, path: Path
+    ) -> RecordingWorkspace:
+        nonlocal workspace_called
+        workspace_called = True
+        return RecordingWorkspace(repo, revision, path, [])
+
     runner = TrialRunner(
         tmp_path,
         SQLiteStorage(tmp_path / "runs.sqlite3"),
         adapters={"codex-exec": adapter_factory},
-        workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
+        workspace_factory=workspace_factory,
     )
 
     with pytest.raises(AdapterConfigurationError, match="MCP"):
         await runner._execute_trial(trial, [], [], [])
 
     assert not adapter_called
+    assert not workspace_called
 
 
 @pytest.mark.asyncio

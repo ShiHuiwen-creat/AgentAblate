@@ -6,7 +6,7 @@ import shutil
 import stat
 import tempfile
 from collections.abc import Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -250,8 +250,8 @@ def _install_and_verify(trees: tuple[SkillTree, ...], workspace: Path) -> _Insta
                 shutil.copytree(target, backup, copy_function=shutil.copy2, symlinks=False)
                 state.backups.append((target, backup))
                 _remove_tree(target)
-            _copy_skill_tree(tree.source, target)
             state.installed_targets.append(target)
+            _copy_skill_tree(tree.source, target)
             installed = inspect_skill(target)
             if installed.identity != tree.identity:
                 raise ValueError(f"installed skill fingerprint mismatch for {tree.identity.name}")
@@ -276,12 +276,8 @@ def _restore(state: _InstallState) -> None:
             _remove_tree(target)
         shutil.copytree(backup, target, copy_function=shutil.copy2, symlinks=False)
     for directory in reversed(state.created_dirs):
-        try:
+        with suppress(FileNotFoundError):
             directory.rmdir()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
     state.temporary.cleanup()
 
 
