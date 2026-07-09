@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agentablate.adapters.base import AdapterResult, AdapterTimeout, AgentEvent
+from agentablate.adapters.base import AdapterCancelled, AdapterResult, AdapterTimeout, AgentEvent
 from agentablate.adapters.codex_exec import CODEX_EXEC_POLICY, CodexExecAdapter
 from agentablate.adapters.command import CommandAdapter
 from agentablate.evaluators import EvaluationResult
@@ -88,6 +88,21 @@ class RecordingAdapter:
         return self.result
 
 
+def _codex_trial_with_runtime(tmp_path: Path, trial_id: str = "codex-trial") -> TrialSpec:
+    runtime = AdapterRuntimeIdentity(
+        schema_version=1,
+        executable=tmp_path / "codex",
+        executable_basename="codex",
+        executable_sha256="a" * 64,
+        version="v",
+        policy=CODEX_EXEC_POLICY,
+        ambient_skills_sha256="b" * 64,
+    )
+    return _trial(tmp_path, trial_id, adapter="codex-exec").model_copy(
+        update={"adapter_runtime": runtime}
+    )
+
+
 @pytest.mark.asyncio
 async def test_trial_runs_workspace_adapter_evaluator_and_persists_matching_events(
     tmp_path: Path,
@@ -124,6 +139,122 @@ async def test_trial_runs_workspace_adapter_evaluator_and_persists_matching_even
     experiment = runner.storage.get_experiment(trial.experiment)
     assert experiment["config_hash"] == trial.config_hash
     assert str(tmp_path) not in experiment["source"]
+
+
+@pytest.mark.asyncio
+async def test_codex_mcp_is_rejected_before_adapter_factory(tmp_path: Path) -> None:
+    trial = _codex_trial_with_runtime(tmp_path).model_copy(
+        update={"variant": VariantConfig(id="with-mcp", mcp=(tmp_path / "server.json",))}
+    )
+    adapter_called = False
+
+    def adapter_factory(trial: TrialSpec) -> RecordingAdapter:
+        nonlocal adapter_called
+        adapter_called = True
+        return RecordingAdapter([], AdapterResult(0, (), "", ""))
+
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        adapters={"codex-exec": adapter_factory},
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
+    )
+
+    with pytest.raises(AdapterConfigurationError, match="MCP"):
+        await runner._execute_trial(trial, [], [], [])
+
+    assert not adapter_called
+
+
+@pytest.mark.asyncio
+async def test_codex_skills_are_removed_before_evaluator(tmp_path: Path) -> None:
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: reviewer\ndescription: Test\n---\n\nUse it.\n",
+        encoding="utf-8",
+    )
+    from agentablate.skills import inspect_skill
+
+    tree = inspect_skill(skill)
+    trial = _codex_trial_with_runtime(tmp_path).model_copy(
+        update={
+            "variant": VariantConfig(id="with-skill", skills=(skill,)),
+            "skill_inputs": (tree.identity,),
+        }
+    )
+    observed_during_adapter = False
+    observed_during_evaluator = False
+
+    class ObservingAdapter:
+        async def run(self, trial: TrialSpec, cwd: Path) -> AdapterResult:
+            nonlocal observed_during_adapter
+            observed_during_adapter = (
+                cwd / ".agents" / "skills" / tree.identity.install_name / "SKILL.md"
+            ).is_file()
+            return AdapterResult(0, (), "", "")
+
+    async def evaluator(task: TaskSpec, path: Path, timeout: float) -> EvaluationResult:
+        nonlocal observed_during_evaluator
+        observed_during_evaluator = (path / ".agents" / "skills").exists()
+        return EvaluationResult(True, 0, "", "", ())
+
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        adapters={"codex-exec": lambda trial: ObservingAdapter()},
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
+        evaluator=evaluator,
+    )
+
+    success, exit_code = await runner._execute_trial(trial, [], [], [])
+
+    assert (success, exit_code) == (True, 0)
+    assert observed_during_adapter
+    assert not observed_during_evaluator
+
+
+@pytest.mark.asyncio
+async def test_codex_cancellation_and_skill_restore_failure_are_both_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: reviewer\ndescription: Test\n---\n\nUse it.\n",
+        encoding="utf-8",
+    )
+    from agentablate.skills import inspect_skill
+
+    tree = inspect_skill(skill)
+    trial = _codex_trial_with_runtime(tmp_path).model_copy(
+        update={
+            "variant": VariantConfig(id="with-skill", skills=(skill,)),
+            "skill_inputs": (tree.identity,),
+        }
+    )
+    cancelled = AdapterCancelled(AdapterResult(-1, (), "partial", "err"))
+    cleanup = OSError("restore failed")
+
+    class FailingAdapter:
+        async def run(self, trial: TrialSpec, cwd: Path) -> AdapterResult:
+            raise cancelled
+
+    monkeypatch.setattr(
+        "agentablate.skills._restore",
+        lambda state: (_ for _ in ()).throw(cleanup),
+    )
+    runner = TrialRunner(
+        tmp_path,
+        SQLiteStorage(tmp_path / "runs.sqlite3"),
+        adapters={"codex-exec": lambda trial: FailingAdapter()},
+        workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
+    )
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        await runner._execute_trial(trial, [], [], [])
+
+    assert list(raised.value.exceptions) == [cancelled, cleanup]
 
 
 @pytest.mark.asyncio

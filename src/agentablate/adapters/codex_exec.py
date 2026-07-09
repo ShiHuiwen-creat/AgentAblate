@@ -81,7 +81,7 @@ class CodexExecAdapter:
             *CODEX_EXEC_POLICY,
             "-C",
             str(cwd),
-            trial.task.prompt,
+            _prompt(trial),
         )
 
     async def run(
@@ -114,6 +114,13 @@ async def _login_status(executable: Path) -> bool:
 
 def codex_allowed_environment() -> tuple[str, ...]:
     return _WINDOWS_ENVIRONMENT if platform.system() == "Windows" else ()
+
+
+def _prompt(trial: TrialSpec) -> str:
+    if not trial.skill_inputs:
+        return trial.task.prompt
+    invocations = " ".join(f"${identity.name}" for identity in trial.skill_inputs)
+    return f"Use these skills for this task: {invocations}\n\n{trial.task.prompt}"
 
 
 def _ambient_skill_paths() -> tuple[Path, ...]:

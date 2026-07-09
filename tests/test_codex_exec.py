@@ -18,6 +18,7 @@ from agentablate.adapters.codex_exec import (
 from agentablate.models import (
     AdapterRuntimeIdentity,
     AgentConfig,
+    SkillInputIdentity,
     TaskSpec,
     TrialSpec,
     VariantConfig,
@@ -475,3 +476,23 @@ def test_windows_allowed_environment_integrates_with_minimal_environment(
 def test_posix_allowed_environment_adds_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("agentablate.adapters.codex_exec.platform.system", lambda: "Linux")
     assert codex_allowed_environment() == ()
+
+
+def test_command_prompt_prepends_exact_skill_invocations(tmp_path: Path) -> None:
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"fake")
+    trial = _trial(tmp_path, "unchanged task prompt").model_copy(
+        update={
+            "skill_inputs": (
+                SkillInputIdentity(name="reviewer", fingerprint="a" * 64, install_name="r"),
+                SkillInputIdentity(name="planner", fingerprint="b" * 64, install_name="p"),
+            )
+        }
+    )
+
+    command = CodexExecAdapter(_runtime(executable)).command_for(trial, tmp_path)
+
+    assert command[-1] == (
+        "Use these skills for this task: $reviewer $planner\n\n"
+        "unchanged task prompt"
+    )

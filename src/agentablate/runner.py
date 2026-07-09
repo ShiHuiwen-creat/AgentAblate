@@ -25,6 +25,7 @@ from agentablate.evaluators import (
 )
 from agentablate.models import TrialSpec
 from agentablate.redaction import Redactor
+from agentablate.skills import installed_skills
 from agentablate.storage import SQLiteStorage
 from agentablate.workspace import WorktreeWorkspace
 
@@ -257,37 +258,17 @@ class TrialRunner:
         async with self.workspace_factory(
             trial.task.repo, trial.task.revision, workspace_path
         ) as workspace:
-            adapter = self._adapter_for(trial)
-            incremental = self._supports_event_sink(adapter)
-            try:
-                if incremental:
-                    adapter_result = await adapter.run(
-                        trial,
-                        workspace.path,
-                        on_event=lambda event: self._append_events(trial.id, (event,)),
+            if trial.agent.adapter == "codex-exec":
+                if trial.variant.mcp:
+                    raise AdapterConfigurationError("codex-exec does not support MCP inputs")
+                with installed_skills(trial.variant.skills, trial.skill_inputs, workspace.path):
+                    adapter_result, incremental = await self._run_adapter(
+                        trial, workspace.path, stdout_parts, stderr_parts, exit_codes
                     )
-                else:
-                    adapter_result = await adapter.run(trial, workspace.path)
-            except AdapterCancelled as exc:
-                self._record_adapter_result(
-                    trial.id,
-                    exc.result,
-                    stdout_parts,
-                    stderr_parts,
-                    include_events=not incremental,
+            else:
+                adapter_result, incremental = await self._run_adapter(
+                    trial, workspace.path, stdout_parts, stderr_parts, exit_codes
                 )
-                exit_codes.append(exc.result.exit_code)
-                raise
-            except AdapterTimeout as exc:
-                self._record_adapter_result(
-                    trial.id,
-                    exc.result,
-                    stdout_parts,
-                    stderr_parts,
-                    include_events=not incremental,
-                )
-                exit_codes.append(exc.result.exit_code)
-                raise
             self._record_adapter_result(
                 trial.id,
                 adapter_result,
@@ -316,6 +297,47 @@ class TrialRunner:
             stderr_parts.append(evaluation.stderr)
             exit_codes.append(evaluation.exit_code)
             return evaluation.success, evaluation.exit_code
+
+    async def _run_adapter(
+        self,
+        trial: TrialSpec,
+        workspace_path: Path,
+        stdout_parts: list[str],
+        stderr_parts: list[str],
+        exit_codes: list[int],
+    ) -> tuple[AdapterResult, bool]:
+        adapter = self._adapter_for(trial)
+        incremental = self._supports_event_sink(adapter)
+        try:
+            if incremental:
+                adapter_result = await adapter.run(
+                    trial,
+                    workspace_path,
+                    on_event=lambda event: self._append_events(trial.id, (event,)),
+                )
+            else:
+                adapter_result = await adapter.run(trial, workspace_path)
+        except AdapterCancelled as exc:
+            self._record_adapter_result(
+                trial.id,
+                exc.result,
+                stdout_parts,
+                stderr_parts,
+                include_events=not incremental,
+            )
+            exit_codes.append(exc.result.exit_code)
+            raise
+        except AdapterTimeout as exc:
+            self._record_adapter_result(
+                trial.id,
+                exc.result,
+                stdout_parts,
+                stderr_parts,
+                include_events=not incremental,
+            )
+            exit_codes.append(exc.result.exit_code)
+            raise
+        return adapter_result, incremental
 
     async def _heartbeat(self, trial_id: str, attempt_id: str) -> None:
         while True:
