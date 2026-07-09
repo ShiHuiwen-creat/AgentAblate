@@ -204,6 +204,7 @@ def discover_codex_runtime() -> AdapterRuntimeIdentity:
         (str(executable), "--version"),
         capture_output=True,
         check=True,
+        env=minimal_environment(codex_allowed_environment()),
         text=True,
     )
     return AdapterRuntimeIdentity(

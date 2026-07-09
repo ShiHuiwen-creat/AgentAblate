@@ -268,10 +268,19 @@ def test_discovery_prefers_path_and_normalizes_version(
     monkeypatch.setattr("agentablate.adapters.codex_exec.platform.system", lambda: "Darwin")
     monkeypatch.setattr("agentablate.adapters.codex_exec._MACOS_CODEX_CANDIDATES", (desktop,))
     monkeypatch.setattr("agentablate.adapters.codex_exec._ambient_skill_paths", lambda: ())
+    monkeypatch.setattr(
+        "agentablate.adapters.codex_exec.minimal_environment",
+        lambda allowed: {"SAFE": "1"},
+    )
 
     def run(command: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
         calls.append(command)
-        assert kwargs == {"capture_output": True, "check": True, "text": True}
+        assert kwargs == {
+            "capture_output": True,
+            "check": True,
+            "env": {"SAFE": "1"},
+            "text": True,
+        }
         return _version()
 
     monkeypatch.setattr("agentablate.adapters.codex_exec.subprocess.run", run)
