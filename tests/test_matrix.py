@@ -257,6 +257,29 @@ def test_codex_runtime_changes_trial_id(
     assert first.id != second.id
 
 
+def test_codex_mcp_is_rejected_before_runtime_discovery(
+    bundle: ExperimentBundle, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundle = _codex_bundle(bundle)
+    config = bundle.config.model_copy(
+        update={"variants": (VariantConfig(id="with-mcp", mcp=(tmp_path / "server.json",)),)}
+    )
+    bundle = bundle.model_copy(update={"config": config})
+    discovered = False
+
+    def discover() -> AdapterRuntimeIdentity:
+        nonlocal discovered
+        discovered = True
+        raise AssertionError("Codex discovery must not run for unsupported MCP trials")
+
+    monkeypatch.setattr("agentablate.matrix.discover_codex_runtime", discover)
+
+    with pytest.raises(ValueError, match="MCP"):
+        expand_matrix(bundle)
+
+    assert not discovered
+
+
 def test_matrix_freezes_structured_skill_inputs_once_per_variant(
     bundle: ExperimentBundle, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -37,6 +37,10 @@ def _trial_id(payload: dict[str, object]) -> str:
 def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
     trials: list[TrialSpec] = []
     meta = bundle.config.experiment
+    if any(agent.adapter == "codex-exec" for agent in bundle.config.agents) and any(
+        variant.mcp for variant in bundle.config.variants
+    ):
+        raise ValueError("codex-exec does not support MCP inputs")
     runtimes = {
         agent.id: discover_codex_runtime()
         for agent in bundle.config.agents
