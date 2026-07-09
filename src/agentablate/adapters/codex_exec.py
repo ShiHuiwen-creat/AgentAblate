@@ -91,6 +91,7 @@ class CodexExecAdapter:
         return await CommandAdapter(
             self.command_for(trial, cwd),
             allowed_env=codex_allowed_environment(),
+            interpolate_prompt=False,
         ).run(trial, cwd, on_event=on_event)
 
 
@@ -210,6 +211,8 @@ def discover_codex_runtime() -> AdapterRuntimeIdentity:
 
 
 def verify_codex_runtime(identity: AdapterRuntimeIdentity) -> None:
+    if identity.policy != CODEX_EXEC_POLICY:
+        raise CodexRuntimeChanged("Codex execution policy changed")
     try:
         executable_hash = _executable_hash(identity.executable)
     except OSError as error:

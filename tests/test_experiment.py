@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agentablate.adapters.codex_exec import CodexExecAdapter
+from agentablate.adapters.codex_exec import CODEX_EXEC_POLICY, CodexExecAdapter
 from agentablate.experiment import (
     ApplicationError,
     _adapter,
@@ -67,7 +67,7 @@ def test_doctor_registry_selects_native_codex_adapter(
         executable_basename="codex",
         executable_sha256="a" * 64,
         version="v",
-        policy=(),
+        policy=CODEX_EXEC_POLICY,
         ambient_skills_sha256="b" * 64,
     )
     monkeypatch.setattr("agentablate.experiment.discover_codex_runtime", lambda: runtime)

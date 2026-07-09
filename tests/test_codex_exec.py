@@ -41,7 +41,7 @@ def _runtime(executable: Path, *, ambient: str | None = None) -> AdapterRuntimeI
     )
 
 
-def _trial(tmp_path: Path, prompt: str, timeout: int = 2) -> TrialSpec:
+def _trial(tmp_path: Path, prompt: str, timeout: int = 10) -> TrialSpec:
     return TrialSpec(
         id="native",
         experiment="demo",
@@ -69,7 +69,7 @@ async def test_native_adapter_uses_literal_prompt_policy_worktree_and_preserves_
     executable.chmod(0o755)
     monkeypatch.setattr("agentablate.adapters.codex_exec._ambient_skill_paths", lambda: ())
     marker = tmp_path / "injected"
-    prompt = f"literal ; touch {marker} $(echo nope)"
+    prompt = f"literal {{prompt}} ; touch {marker} $(echo nope)"
     trial = _trial(tmp_path, prompt)
     adapter = CodexExecAdapter(_runtime(executable))
 
@@ -87,6 +87,28 @@ async def test_native_adapter_uses_literal_prompt_policy_worktree_and_preserves_
     assert json.loads(result.stdout)["argv"] == list(adapter.command_for(trial, tmp_path)[1:])
     assert not marker.exists()
     assert [event.kind for event in result.events] == ["start", "completed"]
+
+
+@pytest.mark.asyncio
+async def test_native_adapter_rejects_tampered_policy_before_process_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"fake")
+    runtime = _runtime(executable).model_copy(update={"policy": ("--dangerous",)})
+    launched = False
+
+    async def create_process(*args, **kwargs):
+        nonlocal launched
+        launched = True
+        raise AssertionError("must not launch")
+
+    monkeypatch.setattr("agentablate.adapters.command.create_process", create_process)
+
+    with pytest.raises(CodexRuntimeChanged, match="policy"):
+        await CodexExecAdapter(runtime).run(_trial(tmp_path, "go"), tmp_path)
+
+    assert not launched
 
 
 @pytest.mark.asyncio
@@ -205,8 +227,12 @@ async def test_native_adapter_preserves_command_process_failures(
     observed: dict[str, object] = {}
 
     class FakeCommandAdapter:
-        def __init__(self, command, *, allowed_env):
-            observed.update(command=command, allowed_env=allowed_env)
+        def __init__(self, command, *, allowed_env, interpolate_prompt):
+            observed.update(
+                command=command,
+                allowed_env=allowed_env,
+                interpolate_prompt=interpolate_prompt,
+            )
 
         async def run(self, trial, cwd, *, on_event=None):
             observed.update(trial=trial, cwd=cwd, on_event=on_event)
@@ -223,6 +249,7 @@ async def test_native_adapter_preserves_command_process_failures(
 
     assert raised.value is terminal
     assert observed["command"][-1] == "go"
+    assert observed["interpolate_prompt"] is False
     assert observed["trial"] is trial and observed["on_event"] is sink
 
 

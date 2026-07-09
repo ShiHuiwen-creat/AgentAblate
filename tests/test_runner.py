@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from agentablate.adapters.base import AdapterResult, AdapterTimeout, AgentEvent
-from agentablate.adapters.codex_exec import CodexExecAdapter
+from agentablate.adapters.codex_exec import CODEX_EXEC_POLICY, CodexExecAdapter
 from agentablate.adapters.command import CommandAdapter
 from agentablate.evaluators import EvaluationResult
 from agentablate.models import (
@@ -66,7 +66,7 @@ def test_runner_registry_selects_native_runtime_and_rejects_missing_runtime(tmp_
         executable_basename="codex",
         executable_sha256="a" * 64,
         version="v",
-        policy=(),
+        policy=CODEX_EXEC_POLICY,
         ambient_skills_sha256="b" * 64,
     )
 

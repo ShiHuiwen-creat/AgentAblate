@@ -52,9 +52,7 @@ async def test_command_adapter_substitutes_prompt_without_a_shell(
     trial: TrialSpec,
     tmp_path: Path,
 ) -> None:
-    adapter = CommandAdapter(
-        (sys.executable, "-c", "import sys; print(sys.argv[1])", "{prompt}")
-    )
+    adapter = CommandAdapter((sys.executable, "-c", "import sys; print(sys.argv[1])", "{prompt}"))
 
     result = await adapter.run(trial, tmp_path)
 
@@ -62,6 +60,21 @@ async def test_command_adapter_substitutes_prompt_without_a_shell(
     assert result.stdout.strip() == trial.task.prompt
     assert result.events[0].data["executable"] == Path(sys.executable).name
     assert not (tmp_path / "should-not-exist").exists()
+
+
+@pytest.mark.asyncio
+async def test_command_adapter_can_disable_prompt_interpolation(
+    trial: TrialSpec, tmp_path: Path
+) -> None:
+    literal = "literal {prompt}"
+    adapter = CommandAdapter(
+        (sys.executable, "-c", "import sys; print(sys.argv[1])", literal),
+        interpolate_prompt=False,
+    )
+
+    result = await adapter.run(trial, tmp_path)
+
+    assert result.stdout.strip() == literal
 
 
 @pytest.mark.asyncio
@@ -75,9 +88,7 @@ async def test_command_adapter_filters_secrets(
     monkeypatch.setenv("SERVICE_SECRET", "secret-value")
     script = "import json, os; print(json.dumps(sorted(os.environ)))"
 
-    filtered = await CommandAdapter((sys.executable, "-c", script)).run(
-        trial, tmp_path
-    )
+    filtered = await CommandAdapter((sys.executable, "-c", script)).run(trial, tmp_path)
     allowed = await CommandAdapter(
         (sys.executable, "-c", "import os; print(os.environ['SERVICE_TOKEN'])"),
         allowed_env=("SERVICE_TOKEN",),
@@ -115,8 +126,7 @@ async def test_cancelling_command_terminates_process(
 ) -> None:
     marker = tmp_path / "leaked"
     script = (
-        "import pathlib, time; time.sleep(0.8); "
-        f"pathlib.Path({str(marker)!r}).write_text('leaked')"
+        f"import pathlib, time; time.sleep(0.8); pathlib.Path({str(marker)!r}).write_text('leaked')"
     )
     running = asyncio.create_task(
         CommandAdapter((sys.executable, "-c", script)).run(trial, tmp_path)
@@ -165,17 +175,14 @@ async def test_start_event_sink_failure_terminates_process(
 ) -> None:
     leaked = tmp_path / "start-sink-leaked"
     script = (
-        "import pathlib, time; time.sleep(0.5); "
-        f"pathlib.Path({str(leaked)!r}).write_text('leaked')"
+        f"import pathlib, time; time.sleep(0.5); pathlib.Path({str(leaked)!r}).write_text('leaked')"
     )
 
     with pytest.raises(OSError, match="event write failed"):
         await CommandAdapter((sys.executable, "-c", script)).run(
             trial,
             tmp_path,
-            on_event=lambda event: (_ for _ in ()).throw(
-                OSError("event write failed")
-            ),
+            on_event=lambda event: (_ for _ in ()).throw(OSError("event write failed")),
         )
     await asyncio.sleep(0.7)
 
@@ -200,9 +207,7 @@ async def test_cancelled_event_sink_failure_preserves_cancellation_and_reaps(
             raise OSError("terminal event write failed")
 
     running = asyncio.create_task(
-        CommandAdapter((sys.executable, "-c", script)).run(
-            trial, tmp_path, on_event=sink
-        )
+        CommandAdapter((sys.executable, "-c", script)).run(trial, tmp_path, on_event=sink)
     )
     async with asyncio.timeout(2):
         while not ready.exists():

@@ -28,20 +28,20 @@ class CommandAdapter:
         command: tuple[str, ...],
         *,
         allowed_env: tuple[str, ...] = (),
+        interpolate_prompt: bool = True,
     ) -> None:
         if not command:
             raise ValueError("command must not be empty")
         self.command = command
         self.allowed_env = allowed_env
+        self.interpolate_prompt = interpolate_prompt
 
     async def doctor(self) -> tuple[bool, str]:
         executable = self.command[0]
         has_path = os.sep in executable or bool(os.altsep and os.altsep in executable)
         if has_path:
             path = Path(executable)
-            available = (
-                path.is_absolute() and path.is_file() and os.access(path, os.X_OK)
-            )
+            available = path.is_absolute() and path.is_file() and os.access(path, os.X_OK)
         else:
             available = shutil.which(executable) is not None
         message = f"{executable} is {'available' if available else 'missing'}"
@@ -50,24 +50,21 @@ class CommandAdapter:
     async def run(
         self, trial: TrialSpec, cwd: Path, *, on_event: EventSink | None = None
     ) -> AdapterResult:
-        command = tuple(
-            argument.replace("{prompt}", trial.task.prompt)
-            for argument in self.command
+        command = (
+            tuple(argument.replace("{prompt}", trial.task.prompt) for argument in self.command)
+            if self.interpolate_prompt
+            else self.command
         )
         environment = minimal_environment(self.allowed_env)
         started = time.monotonic()
-        start_event = AgentEvent(
-            "start", started, {"executable": Path(command[0]).name}
-        )
+        start_event = AgentEvent("start", started, {"executable": Path(command[0]).name})
         process = await create_process(
             command,
             cwd=cwd,
             env=environment,
         )
         try:
-            return await self._run_process(
-                process, trial, start_event, on_event
-            )
+            return await self._run_process(process, trial, start_event, on_event)
         except BaseException as error:
             try:
                 await terminate_process(process)
@@ -85,15 +82,11 @@ class CommandAdapter:
         if on_event is not None:
             on_event(start_event)
         try:
-            stdout_bytes, stderr_bytes = await communicate(
-                process, trial.timeout_seconds
-            )
+            stdout_bytes, stderr_bytes = await communicate(process, trial.timeout_seconds)
         except ProcessCancelled as error:
             events = (
                 start_event,
-                AgentEvent(
-                    "cancelled", time.monotonic(), {"exit_code": error.exit_code}
-                ),
+                AgentEvent("cancelled", time.monotonic(), {"exit_code": error.exit_code}),
             )
             sink_error = self._emit_terminal(on_event, events[-1])
             result = AdapterResult(
@@ -141,9 +134,7 @@ class CommandAdapter:
         )
 
     @staticmethod
-    def _emit_terminal(
-        on_event: EventSink | None, event: AgentEvent
-    ) -> BaseException | None:
+    def _emit_terminal(on_event: EventSink | None, event: AgentEvent) -> BaseException | None:
         if on_event is None:
             return None
         try:
