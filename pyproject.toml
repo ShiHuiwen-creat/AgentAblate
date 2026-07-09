@@ -35,7 +35,7 @@ packages = ["src/agentablate"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-  "/examples/codex-skill-ablation/**",
+  "/examples/**",
   "/src",
   "/tests",
   "/README.md",
