@@ -34,13 +34,17 @@ def _trial_id(payload: dict[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
-def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
-    trials: list[TrialSpec] = []
-    meta = bundle.config.experiment
+def validate_codex_exec_inputs(bundle: ExperimentBundle) -> None:
     if any(agent.adapter == "codex-exec" for agent in bundle.config.agents) and any(
         variant.mcp for variant in bundle.config.variants
     ):
         raise ValueError("codex-exec does not support MCP inputs")
+
+
+def expand_matrix(bundle: ExperimentBundle) -> list[TrialSpec]:
+    trials: list[TrialSpec] = []
+    meta = bundle.config.experiment
+    validate_codex_exec_inputs(bundle)
     runtimes = {
         agent.id: discover_codex_runtime()
         for agent in bundle.config.agents

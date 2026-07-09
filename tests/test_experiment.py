@@ -20,6 +20,7 @@ from agentablate.models import (
     ExperimentBundle,
     ExperimentConfig,
     ExperimentMeta,
+    VariantConfig,
 )
 
 
@@ -76,6 +77,36 @@ def test_doctor_registry_selects_native_codex_adapter(
 
     assert isinstance(selected, CodexExecAdapter)
     assert selected.runtime is runtime
+
+
+def test_doctor_rejects_codex_mcp_before_adapter_factory(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    config = bundle.config.model_copy(
+        update={
+            "agents": (AgentConfig(id="codex", adapter="codex-exec"),),
+            "variants": (VariantConfig(id="with-mcp", mcp=(tmp_path / "server.json",)),),
+        }
+    )
+    bundle = bundle.model_copy(update={"config": config})
+    adapter_called = False
+
+    class Adapter:
+        async def doctor(self) -> tuple[bool, str]:
+            raise AssertionError("doctor must not run")
+
+    def adapter_factory(agent: AgentConfig) -> Adapter:
+        nonlocal adapter_called
+        adapter_called = True
+        return Adapter()
+
+    with pytest.raises(ApplicationError, match="MCP"):
+        doctor_experiment(
+            tmp_path / "agentablate.yaml",
+            loader=lambda path: bundle,
+            adapter_factory=adapter_factory,
+        )
+
+    assert not adapter_called
 
 
 def test_run_forwards_concurrency_and_resume_to_runner(tmp_path: Path) -> None:

@@ -16,7 +16,7 @@ from agentablate.adapters.codex_exec import CodexExecAdapter, discover_codex_run
 from agentablate.adapters.command import CommandAdapter
 from agentablate.adapters.fake import FakeAdapter
 from agentablate.config import load_experiment
-from agentablate.matrix import expand_matrix
+from agentablate.matrix import expand_matrix, validate_codex_exec_inputs
 from agentablate.models import AgentConfig, ExperimentBundle, TrialSpec
 from agentablate.reporting import (
     Comparison,
@@ -68,6 +68,7 @@ async def doctor_experiment_async(
 ) -> tuple[DoctorResult, ...]:
     try:
         bundle = loader(config)
+        validate_codex_exec_inputs(bundle)
 
         results = []
         for agent in bundle.config.agents:
