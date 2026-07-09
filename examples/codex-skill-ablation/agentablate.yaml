@@ -1,0 +1,15 @@
+version: 1
+experiment:
+  name: codex-skill-ablation
+  repetitions: 1
+  timeout_seconds: 120
+agents:
+  - id: codex
+    adapter: codex-exec
+variants:
+  - id: baseline
+  - id: with-skill
+    skills:
+      - ./skill
+tasks:
+  - ./task.yaml

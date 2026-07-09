@@ -8,6 +8,22 @@ class FrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
+class SkillInputIdentity(FrozenModel):
+    name: str
+    fingerprint: str
+    install_name: str
+
+
+class AdapterRuntimeIdentity(FrozenModel):
+    schema_version: Literal[1]
+    executable: Path
+    executable_basename: str
+    executable_sha256: str
+    version: str
+    policy: tuple[str, ...]
+    ambient_skills_sha256: str
+
+
 class ExperimentMeta(FrozenModel):
     name: str
     repetitions: int = Field(default=1, ge=1)
@@ -76,3 +92,5 @@ class TrialSpec(FrozenModel):
     config_hash: str
     extension_hashes: tuple[str, ...]
     evaluator_hash: str = ""
+    adapter_runtime: AdapterRuntimeIdentity | None = None
+    skill_inputs: tuple[SkillInputIdentity, ...] = ()

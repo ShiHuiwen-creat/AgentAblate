@@ -3,8 +3,9 @@
 AgentAblate makes baseline-versus-extension experiments for coding agents local,
 repeatable, and easy to inspect.
 
-> Phase 1 preview: the fake and custom-command adapters are implemented today;
-> first-party coding-agent adapters are on the roadmap.
+> Phase 1 preview: the fake, custom-command, and first-party `codex-exec`
+> adapters are implemented today. Other coding-agent adapters remain on the
+> roadmap.
 
 ## See the result
 
@@ -69,6 +70,43 @@ The fake adapter is deterministic plumbing for validating experiment setup. The
 command adapter runs a user-supplied executable. Neither claims to measure a real
 coding agent; use them to develop tasks and integrations without API cost.
 
+## Codex CLI skill ablations
+
+The `codex-exec` adapter runs the local Codex CLI with a frozen executable,
+version, policy, and ambient-skill fingerprint in each trial ID. Install the
+Codex CLI or Codex Desktop CLI, run `codex login`, and check discovery with:
+
+```bash
+agentablate doctor examples/codex-skill-ablation/agentablate.yaml
+```
+
+On macOS, AgentAblate first uses `codex` on `PATH`, then the Codex Desktop CLI at
+`/Applications/Codex.app/Contents/Resources/codex`. On other platforms it uses
+`PATH` discovery only.
+
+Live Codex runs consume your Codex quota, may use the network, and are intentionally
+manual. For the packaged example:
+
+```bash
+git -C examples/codex-skill-ablation/fixture init
+git -C examples/codex-skill-ablation/fixture config user.name AgentAblate
+git -C examples/codex-skill-ablation/fixture config user.email agentablate@example.invalid
+git -C examples/codex-skill-ablation/fixture add README.md
+git -C examples/codex-skill-ablation/fixture commit -m "Initial fixture"
+agentablate doctor examples/codex-skill-ablation/agentablate.yaml
+agentablate run examples/codex-skill-ablation/agentablate.yaml --variant with-skill
+agentablate compare examples/codex-skill-ablation/.agentablate/results.sqlite3
+agentablate report examples/codex-skill-ablation/.agentablate/results.sqlite3 --format markdown
+```
+
+Codex is always invoked without a shell and with `--json --color never --sandbox
+workspace-write --ephemeral --ignore-user-config`. AgentAblate passes only a
+minimal allowlisted environment, never uses `danger-full-access`, and fails before
+launch if a `codex-exec` trial declares MCP inputs. Ambient user skills are not
+copied into trial worktrees, but their fingerprint is captured as evidence because
+they can affect the local Codex runtime. Variant skills are installed only around
+agent execution and removed before evaluation.
+
 ## Metrics and reproducibility
 
 Phase 1 reports success count, success rate, mean duration, failure categories, and
@@ -97,8 +135,9 @@ and treat the raw records as the source of truth.
 
 ## Adapter roadmap
 
-- Available in Phase 1: deterministic `fake` and bring-your-own `command` adapters.
-- Planned: Codex SDK/CLI/App Server, Claude Code, and Gemini CLI adapters.
+- Available in Phase 1: deterministic `fake`, bring-your-own `command`, and
+  first-party `codex-exec` adapters.
+- Planned: Codex SDK/App Server, Claude Code, and Gemini CLI adapters.
 - Later: richer token/cost metrics and statistical summaries built on raw events.
 
 Roadmap entries are intentions, not currently supported integrations.

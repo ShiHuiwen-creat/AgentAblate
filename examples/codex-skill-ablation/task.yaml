@@ -1,0 +1,11 @@
+id: create-skill-output
+repo: ./fixture
+revision: HEAD
+prompt: >
+  Create codex-skill-output.txt in the repository root containing exactly
+  "Codex skill ablation succeeded." followed by a newline. Do not change any
+  other files.
+test_command:
+  - "{python}"
+  - -c
+  - "from pathlib import Path; assert Path('codex-skill-output.txt').read_text(encoding='utf-8') == 'Codex skill ablation succeeded.\\n'"

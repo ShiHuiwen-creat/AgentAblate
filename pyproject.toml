@@ -19,6 +19,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "build>=1.3",
+  "hatchling>=1.27",
   "pytest>=8.4",
   "pytest-asyncio>=1.0",
   "pytest-cov>=6.2",
@@ -30,6 +32,17 @@ agentablate = "agentablate.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentablate"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/examples/**",
+  "/src",
+  "/tests",
+  "/README.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -12,10 +12,11 @@ from typing import Any
 import yaml
 
 from agentablate.adapters.base import AgentAdapter
+from agentablate.adapters.codex_exec import CodexExecAdapter, discover_codex_runtime
 from agentablate.adapters.command import CommandAdapter
 from agentablate.adapters.fake import FakeAdapter
 from agentablate.config import load_experiment
-from agentablate.matrix import expand_matrix
+from agentablate.matrix import expand_matrix, validate_codex_exec_inputs
 from agentablate.models import AgentConfig, ExperimentBundle, TrialSpec
 from agentablate.reporting import (
     Comparison,
@@ -54,6 +55,8 @@ def _adapter(agent: AgentConfig) -> AgentAdapter:
         return FakeAdapter()
     if agent.adapter == "command":
         return CommandAdapter(agent.command or ())
+    if agent.adapter == "codex-exec":
+        return CodexExecAdapter(discover_codex_runtime())
     raise ApplicationError(f"adapter is not available in Phase 1: {agent.adapter}")
 
 
@@ -65,6 +68,7 @@ async def doctor_experiment_async(
 ) -> tuple[DoctorResult, ...]:
     try:
         bundle = loader(config)
+        validate_codex_exec_inputs(bundle)
 
         results = []
         for agent in bundle.config.agents:

@@ -43,6 +43,12 @@ Credentials are opt-in. Pass only explicitly allowlisted environment variables t
 agent processes; never inherit every secret from the parent environment, log secret
 values, or commit credentials and local absolute paths.
 
+`codex-exec` adapter tests must replace the Codex executable with a local fake
+script. Automated tests and CI must not run live Codex, consume quota, require
+network access, or depend on a logged-in account. Keep fixtures, logs, reports, and
+recorded events free of credentials, tokens, private account details, and local
+absolute paths.
+
 ## Commits and pull requests
 
 Keep commits focused, use an imperative subject, and avoid unrelated formatting.

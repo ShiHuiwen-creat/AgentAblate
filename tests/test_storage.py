@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from agentablate.models import AgentConfig, TaskSpec, TrialSpec, VariantConfig
+from agentablate.models import (
+    AdapterRuntimeIdentity,
+    AgentConfig,
+    TaskSpec,
+    TrialSpec,
+    VariantConfig,
+)
 from agentablate.storage import SQLiteStorage
 
 
@@ -90,6 +96,39 @@ def test_storage_retry_updates_evaluator_hash(tmp_path: Path) -> None:
     storage.start_trial(changed)
 
     assert storage.get_trial(changed.id)["evaluator_hash"] == "new-evaluator-hash"
+
+
+def test_storage_records_canonical_runtime_json(tmp_path: Path) -> None:
+    storage = SQLiteStorage(tmp_path / "runs.sqlite3")
+    runtime = AdapterRuntimeIdentity(
+        schema_version=1,
+        executable="/tools/codex",
+        executable_basename="codex",
+        executable_sha256="a" * 64,
+        version="codex-cli 1.0.0",
+        policy=("--json", "--ephemeral"),
+        ambient_skills_sha256="b" * 64,
+    )
+    trial = _trial(tmp_path).model_copy(update={"adapter_runtime": runtime})
+
+    storage.start_trial(trial)
+
+    row = storage.get_trial(trial.id)
+    assert row["adapter_runtime_json"] == runtime.model_dump(mode="json")
+    with closing(sqlite3.connect(storage.path)) as connection:
+        stored = connection.execute(
+            "SELECT adapter_runtime_json FROM trials WHERE id=?", (trial.id,)
+        ).fetchone()[0]
+    expected = runtime.model_dump(mode="json")
+    assert stored == __import__("json").dumps(expected, sort_keys=True, separators=(",", ":"))
+
+
+def test_storage_non_codex_runtime_is_empty_object(tmp_path: Path) -> None:
+    storage = SQLiteStorage(tmp_path / "runs.sqlite3")
+    trial = _trial(tmp_path)
+    storage.start_trial(trial)
+
+    assert storage.get_trial(trial.id)["adapter_runtime_json"] == {}
 
 
 def test_claim_is_atomic_and_running_requires_explicit_recovery(tmp_path: Path) -> None:
@@ -186,11 +225,10 @@ def test_storage_migrates_legacy_schema_before_writing(tmp_path: Path) -> None:
     assert row["stdout"] == "out"
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
-        columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(trials)")
-        }
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(trials)")}
     assert "implementation_version" in columns
     assert "evaluator_hash" in columns
+    assert "adapter_runtime_json" in columns
 
 
 def test_storage_rejects_newer_schema_version(tmp_path: Path) -> None:
@@ -202,6 +240,30 @@ def test_storage_rejects_newer_schema_version(tmp_path: Path) -> None:
         SQLiteStorage(path)
 
 
+def test_storage_migrates_phase_one_row_without_data_loss(tmp_path: Path) -> None:
+    path = tmp_path / "phase-one.sqlite3"
+    storage = SQLiteStorage(path)
+    trial = _trial(tmp_path)
+    storage.start_trial(trial)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("PRAGMA user_version = 5")
+        connection.execute("ALTER TABLE trials RENAME TO old_trials")
+        connection.execute(
+            """CREATE TABLE trials AS SELECT id, experiment, agent_id, variant_id,
+            task_id, repetition, status, success, duration_seconds, exit_code, error,
+            started_at, completed_at, config_hash, extension_hashes, stdout, stderr,
+            attempt_id, heartbeat_at, adapter_type, implementation_version,
+            evaluator_hash FROM old_trials"""
+        )
+        connection.execute("DROP TABLE old_trials")
+
+    migrated = SQLiteStorage(path)
+
+    row = migrated.get_trial(trial.id)
+    assert row["id"] == trial.id
+    assert row["adapter_runtime_json"] == {}
+
+
 def test_heartbeat_and_recovery_require_current_stale_owner(tmp_path: Path) -> None:
     storage = SQLiteStorage(tmp_path / "runs.sqlite3")
     trial = _trial(tmp_path)
@@ -210,7 +272,5 @@ def test_heartbeat_and_recovery_require_current_stale_owner(tmp_path: Path) -> N
     assert storage.heartbeat(trial.id, claim.attempt_id)
     fresh = storage.get_trial(trial.id)["heartbeat_at"]
     assert not storage.recover_running(trial.id, stale_before=fresh)
-    assert storage.recover_running(
-        trial.id, stale_before="9999-01-01T00:00:00+00:00"
-    )
+    assert storage.recover_running(trial.id, stale_before="9999-01-01T00:00:00+00:00")
     assert not storage.heartbeat(trial.id, claim.attempt_id)

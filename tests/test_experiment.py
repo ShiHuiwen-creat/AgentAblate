@@ -5,14 +5,23 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agentablate.adapters.codex_exec import CODEX_EXEC_POLICY, CodexExecAdapter
 from agentablate.experiment import (
     ApplicationError,
+    _adapter,
     doctor_experiment,
     initialize_experiment,
     run_experiment,
     starter_documents,
 )
-from agentablate.models import AgentConfig, ExperimentBundle, ExperimentConfig, ExperimentMeta
+from agentablate.models import (
+    AdapterRuntimeIdentity,
+    AgentConfig,
+    ExperimentBundle,
+    ExperimentConfig,
+    ExperimentMeta,
+    VariantConfig,
+)
 
 
 def _bundle(tmp_path: Path) -> ExperimentBundle:
@@ -46,6 +55,58 @@ def test_doctor_calls_adapter_doctor(tmp_path: Path) -> None:
 
     assert calls == ["doctor"]
     assert [(result.agent_id, result.available) for result in results] == [("fake", True)]
+
+
+def test_doctor_registry_selects_native_codex_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"codex")
+    runtime = AdapterRuntimeIdentity(
+        schema_version=1,
+        executable=executable,
+        executable_basename="codex",
+        executable_sha256="a" * 64,
+        version="v",
+        policy=CODEX_EXEC_POLICY,
+        ambient_skills_sha256="b" * 64,
+    )
+    monkeypatch.setattr("agentablate.experiment.discover_codex_runtime", lambda: runtime)
+
+    selected = _adapter(AgentConfig(id="codex", adapter="codex-exec"))
+
+    assert isinstance(selected, CodexExecAdapter)
+    assert selected.runtime is runtime
+
+
+def test_doctor_rejects_codex_mcp_before_adapter_factory(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    config = bundle.config.model_copy(
+        update={
+            "agents": (AgentConfig(id="codex", adapter="codex-exec"),),
+            "variants": (VariantConfig(id="with-mcp", mcp=(tmp_path / "server.json",)),),
+        }
+    )
+    bundle = bundle.model_copy(update={"config": config})
+    adapter_called = False
+
+    class Adapter:
+        async def doctor(self) -> tuple[bool, str]:
+            raise AssertionError("doctor must not run")
+
+    def adapter_factory(agent: AgentConfig) -> Adapter:
+        nonlocal adapter_called
+        adapter_called = True
+        return Adapter()
+
+    with pytest.raises(ApplicationError, match="MCP"):
+        doctor_experiment(
+            tmp_path / "agentablate.yaml",
+            loader=lambda path: bundle,
+            adapter_factory=adapter_factory,
+        )
+
+    assert not adapter_called
 
 
 def test_run_forwards_concurrency_and_resume_to_runner(tmp_path: Path) -> None:

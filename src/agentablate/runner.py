@@ -14,6 +14,7 @@ from agentablate.adapters.base import (
     AgentAdapter,
     AgentEvent,
 )
+from agentablate.adapters.codex_exec import CodexExecAdapter
 from agentablate.adapters.command import CommandAdapter
 from agentablate.adapters.fake import FakeAdapter
 from agentablate.evaluators import (
@@ -24,6 +25,7 @@ from agentablate.evaluators import (
 )
 from agentablate.models import TrialSpec
 from agentablate.redaction import Redactor
+from agentablate.skills import installed_skills
 from agentablate.storage import SQLiteStorage
 from agentablate.workspace import WorktreeWorkspace
 
@@ -76,16 +78,27 @@ class TrialRunner:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self._redactor = Redactor()
         self._recovery_attempted: set[str] = set()
-        self.adapters = adapters if adapters is not None else {
-            "fake": lambda trial: FakeAdapter(),
-            "command": self._command_adapter,
-        }
+        self.adapters = (
+            adapters
+            if adapters is not None
+            else {
+                "fake": lambda trial: FakeAdapter(),
+                "command": self._command_adapter,
+                "codex-exec": self._codex_exec_adapter,
+            }
+        )
 
     @staticmethod
     def _command_adapter(trial: TrialSpec) -> AgentAdapter:
         if not trial.agent.command:
             raise AdapterConfigurationError("command adapter requires agent.command")
         return CommandAdapter(trial.agent.command)
+
+    @staticmethod
+    def _codex_exec_adapter(trial: TrialSpec) -> AgentAdapter:
+        if trial.adapter_runtime is None:
+            raise AdapterConfigurationError("codex-exec adapter requires adapter_runtime")
+        return CodexExecAdapter(trial.adapter_runtime)
 
     def events_path(self, trial_id: str) -> Path:
         if not trial_id or Path(trial_id).name != trial_id or trial_id in {".", ".."}:
@@ -124,12 +137,8 @@ class TrialRunner:
             trial.experiment, trial.config_hash, f"{trial.experiment}.yml"
         )
         if self.recover_running and trial.id not in self._recovery_attempted:
-            stale_before = datetime.now(UTC) - timedelta(
-                seconds=self.lease_timeout_seconds
-            )
-            self.storage.recover_running(
-                trial.id, stale_before=stale_before.isoformat()
-            )
+            stale_before = datetime.now(UTC) - timedelta(seconds=self.lease_timeout_seconds)
+            self.storage.recover_running(trial.id, stale_before=stale_before.isoformat())
             self._recovery_attempted.add(trial.id)
         claim = self.storage.claim_trial(trial)
         if claim.status != "claimed":
@@ -138,9 +147,7 @@ class TrialRunner:
             return row
         assert claim.attempt_id is not None
         attempt_id = claim.attempt_id
-        heartbeat_task = asyncio.create_task(
-            self._heartbeat(trial.id, attempt_id)
-        )
+        heartbeat_task = asyncio.create_task(self._heartbeat(trial.id, attempt_id))
         started = time.monotonic()
         status = "failed"
         success: bool | None = False
@@ -155,9 +162,7 @@ class TrialRunner:
         try:
             events_path.unlink(missing_ok=True)
             execution_task = asyncio.create_task(
-                self._execute_trial(
-                    trial, stdout_parts, stderr_parts, exit_codes
-                )
+                self._execute_trial(trial, stdout_parts, stderr_parts, exit_codes)
             )
             try:
                 done, _ = await asyncio.wait(
@@ -166,14 +171,10 @@ class TrialRunner:
                 )
             except asyncio.CancelledError as external_cancel:
                 cleanup_error = await self._cancel_execution(execution_task)
-                if isinstance(
-                    cleanup_error, (AdapterCancelled, EvaluationCancelled)
-                ):
+                if isinstance(cleanup_error, (AdapterCancelled, EvaluationCancelled)):
                     external_cancel.__cause__ = cleanup_error
                 elif cleanup_error is not None:
-                    external_cancel.add_note(
-                        f"trial cleanup failed: {cleanup_error}"
-                    )
+                    external_cancel.add_note(f"trial cleanup failed: {cleanup_error}")
                 raise
             if heartbeat_task in done:
                 heartbeat = heartbeat_task
@@ -183,9 +184,7 @@ class TrialRunner:
                 except TrialLeaseLost as lease_error:
                     cleanup_error = await self._cancel_execution(execution_task)
                     if cleanup_error is not None:
-                        lease_error.add_note(
-                            f"trial cleanup failed: {cleanup_error}"
-                        )
+                        lease_error.add_note(f"trial cleanup failed: {cleanup_error}")
                     raise
                 raise AssertionError("heartbeat task stopped without losing its lease")
             success, exit_code = await execution_task
@@ -212,11 +211,7 @@ class TrialRunner:
                     heartbeat_error = error
             if heartbeat_error is not None:
                 heartbeat_detail = f"heartbeat failed: {heartbeat_error}"
-                error_text = (
-                    f"{error_text}; {heartbeat_detail}"
-                    if error_text
-                    else heartbeat_detail
-                )
+                error_text = f"{error_text}; {heartbeat_detail}" if error_text else heartbeat_detail
                 status = "failed"
                 success = False
                 if cancelled is not None:
@@ -230,21 +225,13 @@ class TrialRunner:
                     duration_seconds=time.monotonic() - started,
                     exit_code=exit_code,
                     error=(
-                        self._redact_text(trial, error_text)
-                        if error_text is not None
-                        else None
+                        self._redact_text(trial, error_text) if error_text is not None else None
                     ),
-                    stdout=self._redactor.text(
-                        "\n".join(part for part in stdout_parts if part)
-                    ),
-                    stderr=self._redactor.text(
-                        "\n".join(part for part in stderr_parts if part)
-                    ),
+                    stdout=self._redactor.text("\n".join(part for part in stdout_parts if part)),
+                    stderr=self._redactor.text("\n".join(part for part in stderr_parts if part)),
                 )
                 if not finished:
-                    ownership_error = RuntimeError(
-                        "trial attempt ownership was lost before finish"
-                    )
+                    ownership_error = RuntimeError("trial attempt ownership was lost before finish")
                     if trial_failure is not None:
                         trial_failure.add_note(str(ownership_error))
                         raise trial_failure
@@ -252,9 +239,7 @@ class TrialRunner:
             except Exception as finish_error:
                 if cancelled is None:
                     raise
-                cancelled.add_note(
-                    f"failed to persist cancelled trial: {finish_error}"
-                )
+                cancelled.add_note(f"failed to persist cancelled trial: {finish_error}")
 
         if cancelled is not None:
             raise cancelled
@@ -269,43 +254,21 @@ class TrialRunner:
         stderr_parts: list[str],
         exit_codes: list[int],
     ) -> tuple[bool, int]:
+        if trial.agent.adapter == "codex-exec" and trial.variant.mcp:
+            raise AdapterConfigurationError("codex-exec does not support MCP inputs")
         workspace_path = self.root / ".agentablate" / "worktrees" / trial.id
         async with self.workspace_factory(
             trial.task.repo, trial.task.revision, workspace_path
         ) as workspace:
-            adapter = self._adapter_for(trial)
-            incremental = self._supports_event_sink(adapter)
-            try:
-                if incremental:
-                    adapter_result = await adapter.run(
-                        trial,
-                        workspace.path,
-                        on_event=lambda event: self._append_events(
-                            trial.id, (event,)
-                        ),
+            if trial.agent.adapter == "codex-exec":
+                with installed_skills(trial.variant.skills, trial.skill_inputs, workspace.path):
+                    adapter_result, incremental = await self._run_adapter(
+                        trial, workspace.path, stdout_parts, stderr_parts, exit_codes
                     )
-                else:
-                    adapter_result = await adapter.run(trial, workspace.path)
-            except AdapterCancelled as exc:
-                self._record_adapter_result(
-                    trial.id,
-                    exc.result,
-                    stdout_parts,
-                    stderr_parts,
-                    include_events=not incremental,
+            else:
+                adapter_result, incremental = await self._run_adapter(
+                    trial, workspace.path, stdout_parts, stderr_parts, exit_codes
                 )
-                exit_codes.append(exc.result.exit_code)
-                raise
-            except AdapterTimeout as exc:
-                self._record_adapter_result(
-                    trial.id,
-                    exc.result,
-                    stdout_parts,
-                    stderr_parts,
-                    include_events=not incremental,
-                )
-                exit_codes.append(exc.result.exit_code)
-                raise
             self._record_adapter_result(
                 trial.id,
                 adapter_result,
@@ -334,6 +297,47 @@ class TrialRunner:
             stderr_parts.append(evaluation.stderr)
             exit_codes.append(evaluation.exit_code)
             return evaluation.success, evaluation.exit_code
+
+    async def _run_adapter(
+        self,
+        trial: TrialSpec,
+        workspace_path: Path,
+        stdout_parts: list[str],
+        stderr_parts: list[str],
+        exit_codes: list[int],
+    ) -> tuple[AdapterResult, bool]:
+        adapter = self._adapter_for(trial)
+        incremental = self._supports_event_sink(adapter)
+        try:
+            if incremental:
+                adapter_result = await adapter.run(
+                    trial,
+                    workspace_path,
+                    on_event=lambda event: self._append_events(trial.id, (event,)),
+                )
+            else:
+                adapter_result = await adapter.run(trial, workspace_path)
+        except AdapterCancelled as exc:
+            self._record_adapter_result(
+                trial.id,
+                exc.result,
+                stdout_parts,
+                stderr_parts,
+                include_events=not incremental,
+            )
+            exit_codes.append(exc.result.exit_code)
+            raise
+        except AdapterTimeout as exc:
+            self._record_adapter_result(
+                trial.id,
+                exc.result,
+                stdout_parts,
+                stderr_parts,
+                include_events=not incremental,
+            )
+            exit_codes.append(exc.result.exit_code)
+            raise
+        return adapter_result, incremental
 
     async def _heartbeat(self, trial_id: str, attempt_id: str) -> None:
         while True:
@@ -387,8 +391,7 @@ class TrialRunner:
     def _supports_event_sink(adapter: AgentAdapter) -> bool:
         parameters = inspect.signature(adapter.run).parameters.values()
         return any(
-            parameter.name == "on_event"
-            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            parameter.name == "on_event" or parameter.kind is inspect.Parameter.VAR_KEYWORD
             for parameter in parameters
         )
 
@@ -405,9 +408,7 @@ class TrialRunner:
             text = text.replace(value, replacement)
         return self._redactor.text(text)
 
-    async def run_all(
-        self, trials: Iterable[TrialSpec], concurrency: int
-    ) -> list[dict[str, Any]]:
+    async def run_all(self, trials: Iterable[TrialSpec], concurrency: int) -> list[dict[str, Any]]:
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
         semaphore = asyncio.Semaphore(concurrency)

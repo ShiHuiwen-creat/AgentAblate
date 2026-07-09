@@ -1,10 +1,13 @@
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from agentablate.matrix import expand_matrix, fingerprint_path
+from agentablate.adapters.codex_exec import CODEX_EXEC_POLICY
+from agentablate.matrix import _trial_id, expand_matrix, fingerprint_path
 from agentablate.models import (
+    AdapterRuntimeIdentity,
     AgentConfig,
     ExperimentBundle,
     ExperimentConfig,
@@ -18,7 +21,7 @@ from agentablate.models import (
 def bundle(tmp_path: Path) -> ExperimentBundle:
     skill = tmp_path / "skill"
     skill.mkdir()
-    (skill / "SKILL.md").write_text("version one")
+    (skill / "SKILL.md").write_text("---\nname: reviewer\ndescription: Test\n---\nversion one\n")
     config = ExperimentConfig(
         version=1,
         experiment=ExperimentMeta(name="demo", repetitions=2),
@@ -75,7 +78,7 @@ def test_skill_content_changes_only_its_variant_ids(
 ) -> None:
     before = expand_matrix(bundle)
     skill_file = bundle.config.variants[1].skills[0] / "SKILL.md"
-    skill_file.write_text("version two")
+    skill_file.write_text("---\nname: reviewer\ndescription: Test\n---\nversion two\n")
 
     after = expand_matrix(bundle)
 
@@ -98,13 +101,28 @@ def test_directory_fingerprint_preserves_file_boundaries(tmp_path: Path) -> None
     assert fingerprint_path(first) != fingerprint_path(second)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX executable bits required")
+def test_directory_fingerprint_binds_executable_mode(tmp_path: Path) -> None:
+    directory = tmp_path / "extension"
+    directory.mkdir()
+    script = directory / "run.sh"
+    script.write_text("exit 0\n")
+    script.chmod(0o755)
+    executable = fingerprint_path(directory)
+    script.chmod(0o644)
+
+    assert fingerprint_path(directory) != executable
+
+
 def test_trial_ids_are_stable_when_experiment_root_moves(
     bundle: ExperimentBundle,
     tmp_path: Path,
 ) -> None:
     copied_skill = tmp_path / "copied" / "skill"
     copied_skill.mkdir(parents=True)
-    (copied_skill / "SKILL.md").write_text("version one")
+    (copied_skill / "SKILL.md").write_text(
+        "---\nname: reviewer\ndescription: Test\n---\nversion one\n"
+    )
     copied_variants = (
         VariantConfig(id="baseline"),
         VariantConfig(id="with-skill", skills=(copied_skill,)),
@@ -116,9 +134,7 @@ def test_trial_ids_are_stable_when_experiment_root_moves(
         check=True,
     )
     copied_task = bundle.tasks[0].model_copy(update={"repo": copied_repo})
-    copied_bundle = bundle.model_copy(
-        update={"config": copied_config, "tasks": (copied_task,)}
-    )
+    copied_bundle = bundle.model_copy(update={"config": copied_config, "tasks": (copied_task,)})
 
     assert [trial.id for trial in expand_matrix(bundle)] == [
         trial.id for trial in expand_matrix(copied_bundle)
@@ -207,3 +223,120 @@ def test_expand_matrix_refreshes_default_dependency_identity(
 
     assert before[0].evaluator_hash != after[0].evaluator_hash
     assert before[0].id != after[0].id
+
+
+def _codex_bundle(bundle: ExperimentBundle) -> ExperimentBundle:
+    config = bundle.config.model_copy(
+        update={"agents": (AgentConfig(id="codex", adapter="codex-exec"),)}
+    )
+    return bundle.model_copy(update={"config": config})
+
+
+def test_codex_runtime_changes_trial_id(
+    bundle: ExperimentBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "agentablate.matrix.discover_codex_runtime",
+        lambda: AdapterRuntimeIdentity(
+            schema_version=1,
+            executable="/tools/codex",
+            executable_basename="codex",
+            executable_sha256="a" * 64,
+            version="codex-cli 1.0.0",
+            policy=CODEX_EXEC_POLICY,
+            ambient_skills_sha256="b" * 64,
+        ),
+    )
+    first = expand_matrix(_codex_bundle(bundle))[0]
+    monkeypatch.setattr(
+        "agentablate.matrix.discover_codex_runtime",
+        lambda: first.adapter_runtime.model_copy(update={"executable_sha256": "c" * 64}),
+    )
+    second = expand_matrix(_codex_bundle(bundle))[0]
+
+    assert first.id != second.id
+
+
+def test_codex_mcp_is_rejected_before_runtime_discovery(
+    bundle: ExperimentBundle, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundle = _codex_bundle(bundle)
+    config = bundle.config.model_copy(
+        update={"variants": (VariantConfig(id="with-mcp", mcp=(tmp_path / "server.json",)),)}
+    )
+    bundle = bundle.model_copy(update={"config": config})
+    discovered = False
+
+    def discover() -> AdapterRuntimeIdentity:
+        nonlocal discovered
+        discovered = True
+        raise AssertionError("Codex discovery must not run for unsupported MCP trials")
+
+    monkeypatch.setattr("agentablate.matrix.discover_codex_runtime", discover)
+
+    with pytest.raises(ValueError, match="MCP"):
+        expand_matrix(bundle)
+
+    assert not discovered
+
+
+def test_matrix_freezes_structured_skill_inputs_once_per_variant(
+    bundle: ExperimentBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agentablate.matrix as matrix
+
+    real_inspect = matrix.inspect_skills
+    calls: list[tuple[Path, ...]] = []
+
+    def inspect(paths: tuple[Path, ...]):
+        calls.append(paths)
+        return real_inspect(paths)
+
+    skill = bundle.config.variants[1].skills[0]
+    skill.joinpath("SKILL.md").write_text(
+        "---\nname: reviewer\ndescription: Test\n---\nInstructions.\n"
+    )
+    monkeypatch.setattr(matrix, "inspect_skills", inspect)
+
+    trials = expand_matrix(bundle)
+
+    assert calls == [(), (skill,)]
+    with_skill = next(trial for trial in trials if trial.variant.id == "with-skill")
+    assert tuple(identity.name for identity in with_skill.skill_inputs) == ("reviewer",)
+    assert all(trial.adapter_runtime is None for trial in trials)
+
+
+@pytest.mark.parametrize("variant_index", (0, 1))
+def test_non_codex_trial_id_matches_phase_one_payload(
+    bundle: ExperimentBundle, variant_index: int
+) -> None:
+    trial = next(
+        trial
+        for trial in expand_matrix(bundle)
+        if trial.variant.id == bundle.config.variants[variant_index].id
+        and trial.repetition == 0
+    )
+    skill_hashes = tuple(
+        fingerprint_path(path) for path in trial.variant.skills
+    )
+    mcp_hashes = tuple(fingerprint_path(path) for path in trial.variant.mcp)
+    phase_one_payload = {
+        "config_hash": bundle.config_hash,
+        "experiment": bundle.config.experiment.name,
+        "agent": trial.agent.model_dump(mode="json"),
+        "variant": {
+            "id": trial.variant.id,
+            "skill_hashes": skill_hashes,
+            "mcp_hashes": mcp_hashes,
+        },
+        "task": {
+            "id": trial.task.id,
+            "revision": trial.task.revision,
+            "prompt": trial.task.prompt,
+            "test_command": trial.task.test_command,
+        },
+        "repetition": trial.repetition,
+        "evaluator_hash": trial.evaluator_hash,
+    }
+
+    assert trial.id == _trial_id(phase_one_payload)
