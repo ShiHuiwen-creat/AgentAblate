@@ -6,11 +6,11 @@ Add a fast, offline demo that makes AgentAblate's core value visible: the same t
 
 ## Scope
 
-The change adds a self-contained example under `examples/skill-impact-demo/`, checked-in representative comparison output, a focused README section, and automated coverage for the example. It also adds portable exact-argument `{python}` resolution to the general command adapter, matching the evaluator's existing contract. It does not add dependencies, publish model-performance claims, or replace the existing Codex example.
+The change adds a self-contained example under `examples/skill-impact-demo/`, checked-in representative comparison output, a focused README section, and automated coverage for the example. It also adds portable exact-argument `{python}` resolution to the general command adapter and applies the existing transactional skill lifecycle to every adapter that declares skills. It does not add dependencies, publish model-performance claims, or replace the existing Codex example.
 
 ## Approach
 
-Use the existing command adapter to run a small deterministic demo agent stored in the fixture repository. The example declares the executable as `{python}`; the command adapter resolves an argument exactly equal to that token to `sys.executable` in both `doctor()` and `run()`. Text that merely contains `{python}` is not modified. During a trial, the demo agent inspects the workspace for an installed skill. Without the skill it exits successfully but deliberately does not create the required artifact. With the skill it reads the installed instruction and creates the exact artifact expected by the task evaluator.
+Use the existing command adapter to run a small deterministic demo agent stored in the fixture repository. The example declares the executable as `{python}`; the command adapter resolves an argument exactly equal to that token to `sys.executable` in both `doctor()` and `run()`. Text that merely contains `{python}` is not modified. The trial runner applies `installed_skills(...)` around agent execution for every adapter, then removes those inputs before evaluation. During a trial, the demo agent inspects the workspace for an installed skill. Without the skill it exits successfully but deliberately does not create the required artifact. With the skill it reads the installed instruction and creates the exact artifact expected by the task evaluator.
 
 This keeps the distinction honest:
 
@@ -39,6 +39,10 @@ The experiment uses one repetition and a short timeout so it completes quickly.
 ### Portable command interpreter
 
 The command adapter accepts `{python}` as its executable token and resolves it to the interpreter running AgentAblate. This is a general command-adapter capability, not demo-specific branching, and keeps the example portable across virtual environments, macOS installations that expose only `python3`, and Windows interpreter paths.
+
+### Adapter-independent skill lifecycle
+
+The trial runner installs frozen variant skills transactionally for any adapter, not only `codex-exec`. The files exist only while the adapter runs and are removed before the evaluator starts. Existing Codex MCP rejection remains unchanged, and variants without skills retain the same visible workspace state at evaluation time.
 
 ### Fixture repository
 
@@ -74,7 +78,7 @@ The README adds a compact section near the top with:
 
 1. AgentAblate loads the example configuration and freezes the experiment matrix.
 2. It creates a detached disposable Git worktree for each variant.
-3. For `with-skill`, it installs the fingerprinted skill under `.agents/skills/`; for `baseline`, that directory is absent.
+3. For `with-skill`, it installs the fingerprinted skill under `.agents/skills/` around command-agent execution; for `baseline`, no skill is exposed to the agent.
 4. The command adapter runs the deterministic demo agent in the disposable worktree.
 5. The evaluator checks `skill-demo-output.txt` after AgentAblate removes temporary skill inputs.
 6. Trial results are written to SQLite.
@@ -95,6 +99,7 @@ Automated tests will:
 
 - validate that all example files are packaged;
 - verify that command-adapter `doctor()` and `run()` resolve exact `{python}` arguments to `sys.executable`;
+- verify that a command adapter can observe a declared skill during execution and that the evaluator cannot observe it afterward;
 - initialize a temporary copy of the fixture repository;
 - run the complete example through the CLI or public experiment path;
 - assert that `baseline` has `0/1` success;

@@ -4,7 +4,7 @@
 
 **Goal:** Add a reproducible offline demo in which the baseline fails, the skill-enabled variant succeeds, and AgentAblate reports a `+100.0 pp` success-rate delta.
 
-**Architecture:** A fixture-local Python command acts as an explicitly labelled deterministic demo agent. The command adapter resolves an exact `{python}` argument to `sys.executable`, matching the evaluator's portable interpreter contract. The demo agent reacts only to a validated skill installed under `.agents/skills`, while workspace isolation, evaluation, SQLite storage, comparison, and reporting remain unchanged.
+**Architecture:** A fixture-local Python command acts as an explicitly labelled deterministic demo agent. The command adapter resolves an exact `{python}` argument to `sys.executable`, and the trial runner applies the existing transactional skill lifecycle to every adapter. The demo agent reacts only to a validated skill installed under `.agents/skills`; evaluation begins after skill cleanup.
 
 **Tech Stack:** Python 3.11+, Typer CLI tests, YAML experiment configuration, Git fixture worktrees, pytest, Ruff, Markdown.
 
@@ -13,7 +13,7 @@
 - The demo must run offline and require no API key.
 - The expected result is `baseline` 0%, `with-skill` 100%, and `+100.0 pp`.
 - The demo must be explicitly labelled deterministic and must not claim Codex or model performance.
-- Do not add dependencies or demo-specific branching to production adapters; exact `{python}` resolution must be a general command-adapter capability.
+- Do not add dependencies or demo-specific branching to production adapters; exact `{python}` resolution and adapter-independent skill installation must be general capabilities.
 - Preserve the live Codex example as the real-agent follow-up path.
 - Support Python 3.11 and newer on the project's existing platforms.
 
@@ -26,6 +26,8 @@
 - `examples/skill-impact-demo/fixture/README.md`: committed fixture seed.
 - `src/agentablate/adapters/command.py`: portable exact `{python}` resolution in doctor and run paths.
 - `tests/test_adapters.py`: command-adapter placeholder contract.
+- `src/agentablate/runner.py`: transactional skill installation around every adapter execution.
+- `tests/test_runner.py`: adapter-independent skill visibility and cleanup contract.
 - `tests/test_example.py`: end-to-end, cleanup, packaging, and documentation-drift coverage.
 - `docs/skill-impact-demo.md`: checked-in representative comparison artifact.
 - `README.md`: first-screen result and copyable walkthrough.
@@ -37,6 +39,8 @@
 **Files:**
 - Modify: `src/agentablate/adapters/command.py`
 - Modify: `tests/test_adapters.py`
+- Modify: `src/agentablate/runner.py`
+- Modify: `tests/test_runner.py`
 - Create: `examples/skill-impact-demo/agentablate.yaml`
 - Create: `examples/skill-impact-demo/task.yaml`
 - Create: `examples/skill-impact-demo/skill/SKILL.md`
@@ -46,7 +50,7 @@
 
 **Interfaces:**
 - Consumes: existing `command` adapter, `.agents/skills/<install-name>/SKILL.md` installation contract, `initialize_fixture_repository()`, and Typer `app`.
-- Produces: a runnable example whose SQLite comparison contains one paired row for `deterministic-demo` and `with-skill` with `success_rate_delta == 1.0`.
+- Produces: portable command execution, adapter-independent transactional skill visibility, and a runnable example whose SQLite comparison contains one paired row for `deterministic-demo` and `with-skill` with `success_rate_delta == 1.0`.
 
 - [ ] **Step 1: Write the failing command-adapter placeholder test**
 
@@ -109,7 +113,71 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 5: Write the failing end-to-end test**
+- [ ] **Step 5: Write the failing adapter-independent skill lifecycle test**
+
+Generalize `test_codex_skills_are_removed_before_evaluator` in `tests/test_runner.py` to use a command trial and rename it:
+
+```python
+@pytest.mark.asyncio
+async def test_variant_skills_are_visible_to_adapter_and_removed_before_evaluator(
+    tmp_path: Path,
+) -> None:
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: reviewer\ndescription: Test\n---\n\nUse it.\n",
+        encoding="utf-8",
+    )
+    from agentablate.skills import inspect_skill
+
+    tree = inspect_skill(skill)
+    trial = _trial(tmp_path, adapter="command").model_copy(
+        update={
+            "agent": AgentConfig(
+                id="command", adapter="command", command=(sys.executable, "-c", "pass")
+            ),
+            "variant": VariantConfig(id="with-skill", skills=(skill,)),
+            "skill_inputs": (tree.identity,),
+        }
+    )
+```
+
+Keep the existing observing adapter and evaluator assertions, register the observing adapter under `command`, and assert the skill exists during adapter execution but `.agents/skills` is absent during evaluation.
+
+- [ ] **Step 6: Run the runner test to verify it fails**
+
+Run:
+
+```bash
+../codex-exec-adapter/.venv/bin/python -m pytest tests/test_runner.py::test_variant_skills_are_visible_to_adapter_and_removed_before_evaluator -q
+```
+
+Expected: FAIL because the command adapter cannot observe the installed skill.
+
+- [ ] **Step 7: Apply the transactional skill lifecycle to every adapter**
+
+In `TrialRunner._execute_trial()`, preserve the Codex MCP rejection and replace the adapter-specific skill branch with:
+
+```python
+with installed_skills(trial.variant.skills, trial.skill_inputs, workspace.path):
+    adapter_result, incremental = await self._run_adapter(
+        trial, workspace.path, stdout_parts, stderr_parts, exit_codes
+    )
+```
+
+The context must end before `_record_adapter_result()` and evaluator execution, preserving cleanup and failure composition behavior.
+
+- [ ] **Step 8: Run the runner test to verify it passes**
+
+Run:
+
+```bash
+../codex-exec-adapter/.venv/bin/python -m pytest tests/test_runner.py::test_variant_skills_are_visible_to_adapter_and_removed_before_evaluator -q
+```
+
+Expected: PASS.
+
+- [ ] **Step 9: Write the failing end-to-end test**
 
 Add these imports and test to `tests/test_example.py`:
 
@@ -124,6 +192,14 @@ def test_skill_impact_demo_shows_deterministic_improvement(
     example = tmp_path / "skill-impact-demo"
     shutil.copytree(source, example)
     initialize_fixture_repository(example / "fixture")
+    subprocess.run(
+        ["git", "-C", str(example / "fixture"), "add", "demo_agent.py"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(example / "fixture"), "commit", "--amend", "--no-edit"],
+        check=True,
+    )
     monkeypatch.chdir(example)
 
     runner = CliRunner()
@@ -156,7 +232,7 @@ def test_skill_impact_demo_shows_deterministic_improvement(
     assert fixture_status.stdout == ""
 ```
 
-- [ ] **Step 6: Run the test to verify the missing example fails**
+- [ ] **Step 10: Run the test to verify the missing example fails**
 
 Run:
 
@@ -166,7 +242,7 @@ Run:
 
 Expected: FAIL because `examples/skill-impact-demo` does not exist or cannot be loaded.
 
-- [ ] **Step 7: Add the minimal example configuration and task**
+- [ ] **Step 11: Add the minimal example configuration and task**
 
 Create `examples/skill-impact-demo/agentablate.yaml`:
 
@@ -202,7 +278,7 @@ test_command:
   - "from pathlib import Path; assert Path('skill-demo-output.txt').read_text(encoding='utf-8') == 'skill enabled\\n'"
 ```
 
-- [ ] **Step 8: Add the deterministic skill and fixture agent**
+- [ ] **Step 12: Add the deterministic skill and fixture agent**
 
 Create `examples/skill-impact-demo/skill/SKILL.md`:
 
@@ -243,22 +319,23 @@ Create `examples/skill-impact-demo/fixture/README.md`:
 This repository is copied into disposable trial worktrees by AgentAblate.
 ```
 
-- [ ] **Step 9: Run the focused tests and lint the changed Python files**
+- [ ] **Step 13: Run the focused tests and lint the changed Python files**
 
 Run:
 
 ```bash
 ../codex-exec-adapter/.venv/bin/python -m pytest tests/test_example.py::test_skill_impact_demo_shows_deterministic_improvement -q
 ../codex-exec-adapter/.venv/bin/python -m pytest tests/test_adapters.py::test_command_adapter_resolves_exact_python_placeholder -q
-../codex-exec-adapter/.venv/bin/python -m ruff check src/agentablate/adapters/command.py tests/test_adapters.py tests/test_example.py examples/skill-impact-demo/fixture/demo_agent.py
+../codex-exec-adapter/.venv/bin/python -m pytest tests/test_runner.py::test_variant_skills_are_visible_to_adapter_and_removed_before_evaluator -q
+../codex-exec-adapter/.venv/bin/python -m ruff check src/agentablate/adapters/command.py src/agentablate/runner.py tests/test_adapters.py tests/test_runner.py tests/test_example.py examples/skill-impact-demo/fixture/demo_agent.py
 ```
 
 Expected: PASS; Ruff reports `All checks passed!`.
 
-- [ ] **Step 10: Commit the portable command and working example**
+- [ ] **Step 14: Commit the portable command, skill lifecycle, and working example**
 
 ```bash
-git add src/agentablate/adapters/command.py tests/test_adapters.py examples/skill-impact-demo tests/test_example.py
+git add src/agentablate/adapters/command.py src/agentablate/runner.py tests/test_adapters.py tests/test_runner.py examples/skill-impact-demo tests/test_example.py
 git commit -m "feat: add portable deterministic skill impact demo"
 ```
 
