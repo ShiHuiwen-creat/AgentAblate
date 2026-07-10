@@ -19,14 +19,22 @@ PROJECT_ROOT = Path(__file__).parents[1]
 
 def test_readme_features_skill_impact_demo() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    section_heading = "## See a skill change the result"
+    section_start = readme.index(section_heading)
+    section = readme[section_start:].split("\n## ", maxsplit=1)[0]
 
-    assert "## See a skill change the result" in readme
-    assert "`baseline` | 0/1 (0%)" in readme
-    assert "`with-skill` | 1/1 (100%)" in readme
-    assert "examples/skill-impact-demo" in readme
-    assert "docs/skill-impact-demo.md" in readme
-    assert "examples/codex-skill-ablation" in readme
-    assert "deterministic" in readme.lower()
+    assert "offline deterministic" in section
+    assert "`baseline` | 0/1 (0%)" in section
+    assert "`with-skill` | 1/1 (100%)" in section
+    assert "+100.0 percentage-point" in section
+    assert "it is not a claim about model performance" in section
+    assert "examples/skill-impact-demo" in section
+    assert "[checked-in comparison](docs/skill-impact-demo.md)" in section
+    assert "[Codex skill-ablation example](examples/codex-skill-ablation)" in section
+    assert (
+        "agentablate report examples/skill-impact-demo/.agentablate/results.sqlite3 "
+        "--format markdown"
+    ) in section
 
 
 def test_skill_impact_demo_shows_deterministic_improvement(

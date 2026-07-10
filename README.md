@@ -48,6 +48,7 @@ git -C examples/skill-impact-demo/fixture add README.md demo_agent.py
 git -C examples/skill-impact-demo/fixture commit -m "Initial fixture"
 agentablate run examples/skill-impact-demo/agentablate.yaml
 agentablate compare examples/skill-impact-demo/.agentablate/results.sqlite3
+agentablate report examples/skill-impact-demo/.agentablate/results.sqlite3 --format markdown
 ```
 
 The `run` command completes successfully because both agent processes execute normally. The task-level `0% → 100%` difference is recorded in the report and comparison. For a live-agent follow-up, use the [Codex skill-ablation example](examples/codex-skill-ablation).
