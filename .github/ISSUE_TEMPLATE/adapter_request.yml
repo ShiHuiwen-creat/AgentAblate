@@ -1,0 +1,37 @@
+name: Adapter request
+description: Suggest a coding-agent adapter for AgentAblate.
+title: "Adapter: "
+labels: ["adapter"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this to suggest a new coding-agent adapter. Please avoid sharing tokens,
+        private logs, or account details.
+  - type: input
+    id: adapter
+    attributes:
+      label: Adapter target
+      description: Which agent or CLI should AgentAblate support?
+      placeholder: "Claude Code, Gemini CLI, Codex SDK, ..."
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Expected workflow
+      description: What command or API should AgentAblate run?
+      placeholder: "How would a user authenticate, launch, stream output, and collect results?"
+    validations:
+      required: true
+  - type: textarea
+    id: reproducibility
+    attributes:
+      label: Reproducibility inputs
+      description: What runtime details should be fingerprinted for stable trial identity?
+      placeholder: "Executable path/hash, version, model, tool policy, config files, ..."
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety constraints
+      description: Any sandboxing, network, credential, or billing concerns?

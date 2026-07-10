@@ -1,11 +1,33 @@
 # AgentAblate
 
-AgentAblate makes baseline-versus-extension experiments for coding agents local,
-repeatable, and easy to inspect.
+[![CI](https://github.com/ShiHuiwen-creat/AgentAblate/actions/workflows/ci.yml/badge.svg)](https://github.com/ShiHuiwen-creat/AgentAblate/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+AgentAblate is a local experiment harness for answering one stubborn coding-agent
+question:
+
+> Did this skill, prompt, MCP server, or tool policy actually improve the agent?
+
+It runs baseline-versus-extension trials in disposable Git worktrees, records the
+raw evidence, and produces reports you can inspect instead of trusting vibes.
 
 > Phase 1 preview: the fake, custom-command, and first-party `codex-exec`
 > adapters are implemented today. Other coding-agent adapters remain on the
 > roadmap.
+
+## Why people use it
+
+- **Ablate agent changes**: compare baseline vs. skill/prompt/tool variants while
+  holding the task and evaluator fixed.
+- **Keep runs reproducible**: trial IDs bind config, task revision, evaluator
+  identity, extension fingerprints, and Codex runtime identity.
+- **Stay local-first**: fixtures run in isolated Git worktrees and results live in
+  SQLite plus JSONL event logs.
+- **Test Codex skills safely**: `codex-exec` invokes the local Codex CLI without a
+  shell, with a minimal environment and workspace-write sandbox.
+- **Build research artifacts**: reports and raw records are designed for empirical
+  coding-agent work, not just demos.
 
 ## See the result
 
@@ -19,7 +41,7 @@ from the quickstart below; measured duration varies by machine.
 | `baseline` | 1/1 |
 | `with-skill` | 1/1 |
 
-## Five-minute quickstart
+## Five-minute local quickstart
 
 Clone the repository, install it, prepare the example fixture, and run the ablation:
 
@@ -107,6 +129,19 @@ copied into trial worktrees, but their fingerprint is captured as evidence becau
 they can affect the local Codex runtime. Variant skills are installed only around
 agent execution and removed before evaluation.
 
+## When AgentAblate is a good fit
+
+Use it when you want to compare agent changes across tasks and keep the evidence:
+
+- Does adding a repo-specific Codex skill improve success rate?
+- Does an MCP server help, hurt, or just add variance?
+- Did a prompt policy change make failures less frequent?
+- Can a coding-agent benchmark be reproduced from a clean checkout?
+
+It is not a leaderboard, hosted benchmark, or substitute for careful task design.
+Start with small task suites, inspect failures, then scale repetitions once the
+setup is trustworthy.
+
 ## Metrics and reproducibility
 
 Phase 1 reports success count, success rate, mean duration, failure categories, and
@@ -155,3 +190,6 @@ software-engineering research: reproducible artifacts first, interpretation seco
 Issues, task suites, adapters, and careful experimental critiques are welcome. Read
 [CONTRIBUTING.md](CONTRIBUTING.md) for the TDD workflow, adapter contract, credential
 rules, and pull-request checklist. AgentAblate is licensed under Apache-2.0.
+
+If this project helps your agent workflow or research, a star makes it easier for
+other coding-agent builders to find.

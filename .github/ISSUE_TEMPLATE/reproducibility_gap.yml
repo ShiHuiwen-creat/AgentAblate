@@ -1,0 +1,40 @@
+name: Reproducibility gap
+description: Report a case where AgentAblate did not capture enough evidence.
+title: "Reproducibility gap: "
+labels: ["reproducibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please redact secrets, tokens, private paths, and account details before
+        posting logs or configs.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What changed without AgentAblate noticing?
+      placeholder: "Example: a runtime setting changed but trial IDs were reused..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What evidence should have been fingerprinted, stored, or reported?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Steps, config snippets, and safe logs that reproduce the issue.
+    validations:
+      required: true
+  - type: dropdown
+    id: adapter
+    attributes:
+      label: Adapter
+      options:
+        - fake
+        - command
+        - codex-exec
+        - other / not sure

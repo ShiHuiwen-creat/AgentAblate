@@ -1,0 +1,38 @@
+name: Task suite contribution
+description: Propose or contribute reproducible tasks for agent ablations.
+title: "Task suite: "
+labels: ["task-suite"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Good task suites are small, inspectable, and reproducible from a clean
+        checkout. Do not include private repositories, credentials, or proprietary
+        data unless they are replaced with safe fixtures.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What behavior should this task suite measure?
+      placeholder: "Example: repo-specific skill following, bug localization, safe refactoring..."
+    validations:
+      required: true
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Fixture design
+      description: What repository/files/tasks would be included?
+    validations:
+      required: true
+  - type: textarea
+    id: evaluator
+    attributes:
+      label: Evaluator
+      description: How should success be checked without relying on subjective judgment?
+      placeholder: "pytest command, script assertion, static check, ..."
+    validations:
+      required: true
+  - type: textarea
+    id: variants
+    attributes:
+      label: Variants worth comparing
+      description: Which skill, prompt, MCP, or policy changes should this suite compare?
