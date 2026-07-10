@@ -176,7 +176,9 @@ async def test_codex_mcp_is_rejected_before_adapter_factory(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_codex_skills_are_removed_before_evaluator(tmp_path: Path) -> None:
+async def test_variant_skills_are_visible_to_adapter_and_removed_before_evaluator(
+    tmp_path: Path,
+) -> None:
     skill = tmp_path / "skill"
     skill.mkdir()
     (skill / "SKILL.md").write_text(
@@ -186,8 +188,11 @@ async def test_codex_skills_are_removed_before_evaluator(tmp_path: Path) -> None
     from agentablate.skills import inspect_skill
 
     tree = inspect_skill(skill)
-    trial = _codex_trial_with_runtime(tmp_path).model_copy(
+    trial = _trial(tmp_path, adapter="command").model_copy(
         update={
+            "agent": AgentConfig(
+                id="command", adapter="command", command=(sys.executable, "-c", "pass")
+            ),
             "variant": VariantConfig(id="with-skill", skills=(skill,)),
             "skill_inputs": (tree.identity,),
         }
@@ -211,7 +216,7 @@ async def test_codex_skills_are_removed_before_evaluator(tmp_path: Path) -> None
     runner = TrialRunner(
         tmp_path,
         SQLiteStorage(tmp_path / "runs.sqlite3"),
-        adapters={"codex-exec": lambda trial: ObservingAdapter()},
+        adapters={"command": lambda trial: ObservingAdapter()},
         workspace_factory=lambda repo, revision, path: RecordingWorkspace(repo, revision, path, []),
         evaluator=evaluator,
     )

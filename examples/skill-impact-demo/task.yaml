@@ -1,0 +1,8 @@
+id: create-skill-demo-output
+repo: ./fixture
+revision: HEAD
+prompt: Create skill-demo-output.txt by following the available skill.
+test_command:
+  - "{python}"
+  - -c
+  - "from pathlib import Path; assert Path('skill-demo-output.txt').read_text(encoding='utf-8') == 'skill enabled\\n'"

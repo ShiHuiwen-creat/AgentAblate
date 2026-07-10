@@ -260,12 +260,7 @@ class TrialRunner:
         async with self.workspace_factory(
             trial.task.repo, trial.task.revision, workspace_path
         ) as workspace:
-            if trial.agent.adapter == "codex-exec":
-                with installed_skills(trial.variant.skills, trial.skill_inputs, workspace.path):
-                    adapter_result, incremental = await self._run_adapter(
-                        trial, workspace.path, stdout_parts, stderr_parts, exit_codes
-                    )
-            else:
+            with installed_skills(trial.variant.skills, trial.skill_inputs, workspace.path):
                 adapter_result, incremental = await self._run_adapter(
                     trial, workspace.path, stdout_parts, stderr_parts, exit_codes
                 )

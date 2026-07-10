@@ -1,0 +1,16 @@
+version: 1
+experiment:
+  name: deterministic-skill-impact
+  repetitions: 1
+  timeout_seconds: 30
+agents:
+  - id: deterministic-demo
+    adapter: command
+    command: ["{python}", demo_agent.py]
+variants:
+  - id: baseline
+  - id: with-skill
+    skills:
+      - ./skill
+tasks:
+  - ./task.yaml
