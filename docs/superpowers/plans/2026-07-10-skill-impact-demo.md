@@ -4,7 +4,7 @@
 
 **Goal:** Add a reproducible offline demo in which the baseline fails, the skill-enabled variant succeeds, and AgentAblate reports a `+100.0 pp` success-rate delta.
 
-**Architecture:** A fixture-local Python command acts as an explicitly labelled deterministic demo agent. It reacts only to a validated skill installed under `.agents/skills`, while the existing command adapter, workspace isolation, evaluator, SQLite storage, comparison, and report paths remain unchanged. Documentation exposes the result without presenting it as real-model evidence.
+**Architecture:** A fixture-local Python command acts as an explicitly labelled deterministic demo agent. The command adapter resolves an exact `{python}` argument to `sys.executable`, matching the evaluator's portable interpreter contract. The demo agent reacts only to a validated skill installed under `.agents/skills`, while workspace isolation, evaluation, SQLite storage, comparison, and reporting remain unchanged.
 
 **Tech Stack:** Python 3.11+, Typer CLI tests, YAML experiment configuration, Git fixture worktrees, pytest, Ruff, Markdown.
 
@@ -13,7 +13,7 @@
 - The demo must run offline and require no API key.
 - The expected result is `baseline` 0%, `with-skill` 100%, and `+100.0 pp`.
 - The demo must be explicitly labelled deterministic and must not claim Codex or model performance.
-- Do not add dependencies or demo-specific branching to production adapters.
+- Do not add dependencies or demo-specific branching to production adapters; exact `{python}` resolution must be a general command-adapter capability.
 - Preserve the live Codex example as the real-agent follow-up path.
 - Support Python 3.11 and newer on the project's existing platforms.
 
@@ -24,6 +24,8 @@
 - `examples/skill-impact-demo/skill/SKILL.md`: the treatment instruction.
 - `examples/skill-impact-demo/fixture/demo_agent.py`: deterministic agent behavior.
 - `examples/skill-impact-demo/fixture/README.md`: committed fixture seed.
+- `src/agentablate/adapters/command.py`: portable exact `{python}` resolution in doctor and run paths.
+- `tests/test_adapters.py`: command-adapter placeholder contract.
 - `tests/test_example.py`: end-to-end, cleanup, packaging, and documentation-drift coverage.
 - `docs/skill-impact-demo.md`: checked-in representative comparison artifact.
 - `README.md`: first-screen result and copyable walkthrough.
@@ -33,6 +35,8 @@
 ### Task 1: Build the End-to-End Deterministic Example
 
 **Files:**
+- Modify: `src/agentablate/adapters/command.py`
+- Modify: `tests/test_adapters.py`
 - Create: `examples/skill-impact-demo/agentablate.yaml`
 - Create: `examples/skill-impact-demo/task.yaml`
 - Create: `examples/skill-impact-demo/skill/SKILL.md`
@@ -44,7 +48,68 @@
 - Consumes: existing `command` adapter, `.agents/skills/<install-name>/SKILL.md` installation contract, `initialize_fixture_repository()`, and Typer `app`.
 - Produces: a runnable example whose SQLite comparison contains one paired row for `deterministic-demo` and `with-skill` with `success_rate_delta == 1.0`.
 
-- [ ] **Step 1: Write the failing end-to-end test**
+- [ ] **Step 1: Write the failing command-adapter placeholder test**
+
+Add to `tests/test_adapters.py`:
+
+```python
+@pytest.mark.asyncio
+async def test_command_adapter_resolves_exact_python_placeholder(tmp_path: Path) -> None:
+    adapter = CommandAdapter(
+        ("{python}", "-c", "import sys; print(sys.executable)")
+    )
+
+    available, _ = await adapter.doctor()
+    result = await adapter.run(_trial(), tmp_path)
+
+    assert available is True
+    assert Path(result.stdout.strip()).resolve() == Path(sys.executable).resolve()
+```
+
+- [ ] **Step 2: Run the placeholder test to verify it fails**
+
+Run:
+
+```bash
+../codex-exec-adapter/.venv/bin/python -m pytest tests/test_adapters.py::test_command_adapter_resolves_exact_python_placeholder -q
+```
+
+Expected: FAIL because `doctor()` reports `{python}` missing or process launch raises `FileNotFoundError`.
+
+- [ ] **Step 3: Implement exact portable interpreter resolution**
+
+Import `sys` in `src/agentablate/adapters/command.py`. Resolve the executable in `doctor()`:
+
+```python
+executable = sys.executable if self.command[0] == "{python}" else self.command[0]
+```
+
+Build the runtime command in `run()` with exact-token handling before prompt interpolation:
+
+```python
+command = tuple(
+    sys.executable
+    if argument == "{python}"
+    else (
+        argument.replace("{prompt}", trial.task.prompt)
+        if self.interpolate_prompt
+        else argument
+    )
+    for argument in self.command
+)
+```
+
+- [ ] **Step 4: Run the placeholder test to verify it passes**
+
+Run:
+
+```bash
+../codex-exec-adapter/.venv/bin/python -m pytest tests/test_adapters.py::test_command_adapter_resolves_exact_python_placeholder -q
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Write the failing end-to-end test**
 
 Add these imports and test to `tests/test_example.py`:
 
@@ -91,7 +156,7 @@ def test_skill_impact_demo_shows_deterministic_improvement(
     assert fixture_status.stdout == ""
 ```
 
-- [ ] **Step 2: Run the test to verify the missing example fails**
+- [ ] **Step 6: Run the test to verify the missing example fails**
 
 Run:
 
@@ -101,7 +166,7 @@ Run:
 
 Expected: FAIL because `examples/skill-impact-demo` does not exist or cannot be loaded.
 
-- [ ] **Step 3: Add the minimal example configuration and task**
+- [ ] **Step 7: Add the minimal example configuration and task**
 
 Create `examples/skill-impact-demo/agentablate.yaml`:
 
@@ -114,7 +179,7 @@ experiment:
 agents:
   - id: deterministic-demo
     adapter: command
-    command: [python, demo_agent.py]
+    command: ["{python}", demo_agent.py]
 variants:
   - id: baseline
   - id: with-skill
@@ -137,7 +202,7 @@ test_command:
   - "from pathlib import Path; assert Path('skill-demo-output.txt').read_text(encoding='utf-8') == 'skill enabled\\n'"
 ```
 
-- [ ] **Step 4: Add the deterministic skill and fixture agent**
+- [ ] **Step 8: Add the deterministic skill and fixture agent**
 
 Create `examples/skill-impact-demo/skill/SKILL.md`:
 
@@ -178,22 +243,23 @@ Create `examples/skill-impact-demo/fixture/README.md`:
 This repository is copied into disposable trial worktrees by AgentAblate.
 ```
 
-- [ ] **Step 5: Run the focused test and lint the fixture agent**
+- [ ] **Step 9: Run the focused tests and lint the changed Python files**
 
 Run:
 
 ```bash
 ../codex-exec-adapter/.venv/bin/python -m pytest tests/test_example.py::test_skill_impact_demo_shows_deterministic_improvement -q
-../codex-exec-adapter/.venv/bin/python -m ruff check tests/test_example.py examples/skill-impact-demo/fixture/demo_agent.py
+../codex-exec-adapter/.venv/bin/python -m pytest tests/test_adapters.py::test_command_adapter_resolves_exact_python_placeholder -q
+../codex-exec-adapter/.venv/bin/python -m ruff check src/agentablate/adapters/command.py tests/test_adapters.py tests/test_example.py examples/skill-impact-demo/fixture/demo_agent.py
 ```
 
 Expected: PASS; Ruff reports `All checks passed!`.
 
-- [ ] **Step 6: Commit the working example**
+- [ ] **Step 10: Commit the portable command and working example**
 
 ```bash
-git add examples/skill-impact-demo tests/test_example.py
-git commit -m "feat: add deterministic skill impact demo"
+git add src/agentablate/adapters/command.py tests/test_adapters.py examples/skill-impact-demo tests/test_example.py
+git commit -m "feat: add portable deterministic skill impact demo"
 ```
 
 ---

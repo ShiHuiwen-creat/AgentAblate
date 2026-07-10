@@ -6,11 +6,11 @@ Add a fast, offline demo that makes AgentAblate's core value visible: the same t
 
 ## Scope
 
-The change adds a self-contained example under `examples/skill-impact-demo/`, checked-in representative comparison output, a focused README section, and automated coverage for the example. It does not change the behavior of real agent adapters, add dependencies, publish model-performance claims, or replace the existing Codex example.
+The change adds a self-contained example under `examples/skill-impact-demo/`, checked-in representative comparison output, a focused README section, and automated coverage for the example. It also adds portable exact-argument `{python}` resolution to the general command adapter, matching the evaluator's existing contract. It does not add dependencies, publish model-performance claims, or replace the existing Codex example.
 
 ## Approach
 
-Use the existing command adapter to run a small deterministic demo agent stored in the fixture repository. During a trial, the demo agent inspects the workspace for an installed skill. Without the skill it exits successfully but deliberately does not create the required artifact. With the skill it reads the installed instruction and creates the exact artifact expected by the task evaluator.
+Use the existing command adapter to run a small deterministic demo agent stored in the fixture repository. The example declares the executable as `{python}`; the command adapter resolves an argument exactly equal to that token to `sys.executable` in both `doctor()` and `run()`. Text that merely contains `{python}` is not modified. During a trial, the demo agent inspects the workspace for an installed skill. Without the skill it exits successfully but deliberately does not create the required artifact. With the skill it reads the installed instruction and creates the exact artifact expected by the task evaluator.
 
 This keeps the distinction honest:
 
@@ -35,6 +35,10 @@ Alternatives rejected:
 - `with-skill`, with the local demo skill.
 
 The experiment uses one repetition and a short timeout so it completes quickly.
+
+### Portable command interpreter
+
+The command adapter accepts `{python}` as its executable token and resolves it to the interpreter running AgentAblate. This is a general command-adapter capability, not demo-specific branching, and keeps the example portable across virtual environments, macOS installations that expose only `python3`, and Windows interpreter paths.
 
 ### Fixture repository
 
@@ -80,7 +84,7 @@ The README adds a compact section near the top with:
 ## Error Handling
 
 - A missing or malformed skill is rejected by existing configuration and skill validation.
-- A missing Python executable is reported by the command adapter doctor check.
+- The `{python}` token is resolved before the command adapter doctor check and process launch; a literal non-placeholder executable still uses the existing availability check.
 - A fixture that has not been initialized as a Git repository fails with the existing workspace error and is addressed by explicit setup commands.
 - The demo agent treats unexpected or multiple demo skills as failure conditions instead of guessing.
 - The checked-in representative result is regenerated and compared in tests so documentation cannot silently drift from behavior.
@@ -90,6 +94,7 @@ The README adds a compact section near the top with:
 Automated tests will:
 
 - validate that all example files are packaged;
+- verify that command-adapter `doctor()` and `run()` resolve exact `{python}` arguments to `sys.executable`;
 - initialize a temporary copy of the fixture repository;
 - run the complete example through the CLI or public experiment path;
 - assert that `baseline` has `0/1` success;
