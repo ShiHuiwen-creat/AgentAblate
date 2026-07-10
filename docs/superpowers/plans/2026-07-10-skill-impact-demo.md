@@ -207,8 +207,8 @@ def test_skill_impact_demo_shows_deterministic_improvement(
     compare_result = runner.invoke(app, ["compare"])
     report_result = runner.invoke(app, ["report", "--format", "markdown"])
 
-    assert run_result.exit_code == 1, run_result.output
-    assert "Ran 2 trial(s); 1 failed" in run_result.output
+    assert run_result.exit_code == 0, run_result.output
+    assert "Ran 2 trial(s); 0 failed" in run_result.output
     assert compare_result.exit_code == 0, compare_result.output
     assert "+100.0 pp" in compare_result.output
     assert report_result.exit_code == 0, report_result.output
@@ -483,7 +483,7 @@ agentablate run examples/skill-impact-demo/agentablate.yaml
 agentablate compare examples/skill-impact-demo/.agentablate/results.sqlite3
 ```
 
-The `run` command intentionally exits non-zero after recording both trials because one baseline trial fails. For a live-agent follow-up, use the [Codex skill-ablation example](examples/codex-skill-ablation).
+The `run` command completes successfully because both agent processes execute normally. The task-level `0% → 100%` difference is recorded in the report and comparison. For a live-agent follow-up, use the [Codex skill-ablation example](examples/codex-skill-ablation).
 ```
 
 - [ ] **Step 4: Run the README contract and all example tests**

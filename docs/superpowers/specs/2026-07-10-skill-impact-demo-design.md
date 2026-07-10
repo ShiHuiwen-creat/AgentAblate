@@ -85,6 +85,8 @@ The README adds a compact section near the top with:
 7. `compare` aggregates the paired baseline and treatment trials and renders the success-rate delta.
 8. `report` renders the full experiment summary.
 
+The CLI run succeeds when both agent processes complete normally; task-level evaluator failure is experiment evidence rather than an execution error. The baseline-versus-treatment difference is communicated by `compare` and `report`.
+
 ## Error Handling
 
 - A missing or malformed skill is rejected by existing configuration and skill validation.
