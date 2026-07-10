@@ -17,6 +17,18 @@ from agentablate.workspace import initialize_fixture_repository
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
+def test_readme_features_skill_impact_demo() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "## See a skill change the result" in readme
+    assert "`baseline` | 0/1 (0%)" in readme
+    assert "`with-skill` | 1/1 (100%)" in readme
+    assert "examples/skill-impact-demo" in readme
+    assert "docs/skill-impact-demo.md" in readme
+    assert "examples/codex-skill-ablation" in readme
+    assert "deterministic" in readme.lower()
+
+
 def test_skill_impact_demo_shows_deterministic_improvement(
     tmp_path: Path, monkeypatch
 ) -> None:
