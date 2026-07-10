@@ -39,6 +39,15 @@ def test_skill_impact_demo_shows_deterministic_improvement(
     compare_result = runner.invoke(app, ["compare"])
     report_result = runner.invoke(app, ["report", "--format", "markdown"])
 
+    checked_in_result = (PROJECT_ROOT / "docs" / "skill-impact-demo.md").read_text(
+        encoding="utf-8"
+    )
+    expected_comparison_rows = [
+        line for line in compare_result.output.splitlines() if line.startswith("|")
+    ]
+    for line in expected_comparison_rows:
+        assert line in checked_in_result
+
     assert run_result.exit_code == 0, run_result.output
     assert "Ran 2 trial(s); 0 failed" in run_result.output
     assert compare_result.exit_code == 0, compare_result.output
@@ -90,7 +99,7 @@ def test_fake_ablation_example_runs_and_reports_both_variants(
         assert "with-skill" in text
 
 
-def test_codex_example_is_packaged_and_valid(
+def test_examples_are_packaged_and_valid(
     tmp_path: Path, monkeypatch
 ) -> None:
     example = PROJECT_ROOT / "examples" / "codex-skill-ablation"
@@ -99,6 +108,11 @@ def test_codex_example_is_packaged_and_valid(
         "examples/codex-skill-ablation/task.yaml",
         "examples/codex-skill-ablation/fixture/README.md",
         "examples/codex-skill-ablation/skill/SKILL.md",
+        "examples/skill-impact-demo/agentablate.yaml",
+        "examples/skill-impact-demo/task.yaml",
+        "examples/skill-impact-demo/fixture/README.md",
+        "examples/skill-impact-demo/fixture/demo_agent.py",
+        "examples/skill-impact-demo/skill/SKILL.md",
     }
 
     sdist_dir = tmp_path / "sdist"
