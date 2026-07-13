@@ -63,6 +63,9 @@ cd examples/fake-ablation
 ../../.venv/bin/agentablate report --format html
 ```
 
+The report commands write `agentablate-report.md` and `agentablate-report.html`
+in `examples/fake-ablation`. Pass `--output <path>` to choose another destination.
+
 Without uv, create a standard environment with `python -m venv .venv`, activate it,
 and run `python -m pip install -e '.[dev]'`. On Windows, invoke
 `..\\..\\.venv\\Scripts\\agentablate` in the final commands. In task commands, an
