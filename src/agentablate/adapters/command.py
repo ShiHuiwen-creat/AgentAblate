@@ -1,6 +1,7 @@
 import asyncio
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -37,7 +38,7 @@ class CommandAdapter:
         self.interpolate_prompt = interpolate_prompt
 
     async def doctor(self) -> tuple[bool, str]:
-        executable = self.command[0]
+        executable = sys.executable if self.command[0] == "{python}" else self.command[0]
         has_path = os.sep in executable or bool(os.altsep and os.altsep in executable)
         if has_path:
             path = Path(executable)
@@ -50,10 +51,15 @@ class CommandAdapter:
     async def run(
         self, trial: TrialSpec, cwd: Path, *, on_event: EventSink | None = None
     ) -> AdapterResult:
-        command = (
-            tuple(argument.replace("{prompt}", trial.task.prompt) for argument in self.command)
-            if self.interpolate_prompt
-            else self.command
+        command = tuple(
+            sys.executable
+            if argument == "{python}"
+            else (
+                argument.replace("{prompt}", trial.task.prompt)
+                if self.interpolate_prompt
+                else argument
+            )
+            for argument in self.command
         )
         environment = minimal_environment(self.allowed_env)
         started = time.monotonic()

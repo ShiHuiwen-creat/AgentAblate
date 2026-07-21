@@ -29,17 +29,29 @@ raw evidence, and produces reports you can inspect instead of trusting vibes.
 - **Build research artifacts**: reports and raw records are designed for empirical
   coding-agent work, not just demos.
 
-## See the result
+## See a skill change the result
 
-Open the checked-in [sample Markdown report](docs/sample-report.md) or
-[sample HTML report](docs/sample-report.html). These representative files are
-golden-tested against the current renderers and use the fake-adapter experiment
-from the quickstart below; measured duration varies by machine.
+The included offline deterministic demo runs the same task twice and changes only the skill input:
 
 | Variant | Success |
 |---|---:|
-| `baseline` | 1/1 |
-| `with-skill` | 1/1 |
+| `baseline` | 0/1 (0%) |
+| `with-skill` | 1/1 (100%) |
+
+That is a **+100.0 percentage-point** delta. It demonstrates AgentAblate's real skill-installation, evaluation, comparison, and reporting path; it is not a claim about model performance. See the [checked-in comparison](docs/skill-impact-demo.md).
+
+```bash
+git -C examples/skill-impact-demo/fixture init
+git -C examples/skill-impact-demo/fixture config user.name AgentAblate
+git -C examples/skill-impact-demo/fixture config user.email agentablate@example.invalid
+git -C examples/skill-impact-demo/fixture add README.md demo_agent.py
+git -C examples/skill-impact-demo/fixture commit -m "Initial fixture"
+agentablate run examples/skill-impact-demo/agentablate.yaml
+agentablate compare examples/skill-impact-demo/.agentablate/results.sqlite3
+agentablate report examples/skill-impact-demo/.agentablate/results.sqlite3 --format markdown
+```
+
+The `run` command completes successfully because both agent processes execute normally. The task-level `0% → 100%` difference is recorded in the report and comparison. For a live-agent follow-up, use the [Codex skill-ablation example](examples/codex-skill-ablation).
 
 ## Five-minute local quickstart
 

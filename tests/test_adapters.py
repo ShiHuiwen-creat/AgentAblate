@@ -63,6 +63,19 @@ async def test_command_adapter_substitutes_prompt_without_a_shell(
 
 
 @pytest.mark.asyncio
+async def test_command_adapter_resolves_exact_python_placeholder(
+    trial: TrialSpec, tmp_path: Path
+) -> None:
+    adapter = CommandAdapter(("{python}", "-c", "import sys; print(sys.executable)"))
+
+    available, _ = await adapter.doctor()
+    result = await adapter.run(trial, tmp_path)
+
+    assert available is True
+    assert Path(result.stdout.strip()).resolve() == Path(sys.executable).resolve()
+
+
+@pytest.mark.asyncio
 async def test_command_adapter_can_disable_prompt_interpolation(
     trial: TrialSpec, tmp_path: Path
 ) -> None:

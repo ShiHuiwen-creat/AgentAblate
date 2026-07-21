@@ -10,10 +10,87 @@ from typer.testing import CliRunner
 
 from agentablate.cli import app
 from agentablate.config import load_experiment
+from agentablate.reporting import load_comparison, load_report
 from agentablate.skills import inspect_skill
 from agentablate.workspace import initialize_fixture_repository
 
 PROJECT_ROOT = Path(__file__).parents[1]
+
+
+def test_readme_features_skill_impact_demo() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    section_heading = "## See a skill change the result"
+    section_start = readme.index(section_heading)
+    section = readme[section_start:].split("\n## ", maxsplit=1)[0]
+
+    assert "offline deterministic" in section
+    assert "`baseline` | 0/1 (0%)" in section
+    assert "`with-skill` | 1/1 (100%)" in section
+    assert "+100.0 percentage-point" in section
+    assert "it is not a claim about model performance" in section
+    assert "examples/skill-impact-demo" in section
+    assert "[checked-in comparison](docs/skill-impact-demo.md)" in section
+    assert "[Codex skill-ablation example](examples/codex-skill-ablation)" in section
+    assert (
+        "agentablate report examples/skill-impact-demo/.agentablate/results.sqlite3 "
+        "--format markdown"
+    ) in section
+
+
+def test_skill_impact_demo_shows_deterministic_improvement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = PROJECT_ROOT / "examples" / "skill-impact-demo"
+    example = tmp_path / "skill-impact-demo"
+    shutil.copytree(source, example)
+    initialize_fixture_repository(example / "fixture")
+    subprocess.run(
+        ["git", "-C", str(example / "fixture"), "add", "demo_agent.py"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(example / "fixture"), "commit", "--amend", "--no-edit"],
+        check=True,
+    )
+    monkeypatch.chdir(example)
+
+    runner = CliRunner()
+    run_result = runner.invoke(app, ["run"])
+    compare_result = runner.invoke(app, ["compare"])
+    report_result = runner.invoke(app, ["report", "--format", "markdown"])
+
+    checked_in_result = (PROJECT_ROOT / "docs" / "skill-impact-demo.md").read_text(
+        encoding="utf-8"
+    )
+    expected_comparison_rows = [
+        line for line in compare_result.output.splitlines() if line.startswith("|")
+    ]
+    for line in expected_comparison_rows:
+        assert line in checked_in_result
+
+    assert run_result.exit_code == 0, run_result.output
+    assert "Ran 2 trial(s); 0 failed" in run_result.output
+    assert compare_result.exit_code == 0, compare_result.output
+    assert "+100.0 pp" in compare_result.output
+    assert report_result.exit_code == 0, report_result.output
+
+    database = example / ".agentablate" / "results.sqlite3"
+    report = load_report(database)
+    comparison = load_comparison(database)
+    assert [(row.variant_id, row.success_count) for row in report.rows] == [
+        ("baseline", 0),
+        ("with-skill", 1),
+    ]
+    assert len(comparison.rows) == 1
+    assert comparison.rows[0].success_rate_delta == 1.0
+    assert not (example / "fixture" / "skill-demo-output.txt").exists()
+    fixture_status = subprocess.run(
+        ["git", "-C", str(example / "fixture"), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert fixture_status.stdout == ""
 
 
 def test_fake_ablation_example_runs_and_reports_both_variants(
@@ -42,7 +119,7 @@ def test_fake_ablation_example_runs_and_reports_both_variants(
         assert "with-skill" in text
 
 
-def test_codex_example_is_packaged_and_valid(
+def test_examples_are_packaged_and_valid(
     tmp_path: Path, monkeypatch
 ) -> None:
     example = PROJECT_ROOT / "examples" / "codex-skill-ablation"
@@ -51,6 +128,11 @@ def test_codex_example_is_packaged_and_valid(
         "examples/codex-skill-ablation/task.yaml",
         "examples/codex-skill-ablation/fixture/README.md",
         "examples/codex-skill-ablation/skill/SKILL.md",
+        "examples/skill-impact-demo/agentablate.yaml",
+        "examples/skill-impact-demo/task.yaml",
+        "examples/skill-impact-demo/fixture/README.md",
+        "examples/skill-impact-demo/fixture/demo_agent.py",
+        "examples/skill-impact-demo/skill/SKILL.md",
     }
 
     sdist_dir = tmp_path / "sdist"
